@@ -16,75 +16,80 @@ permissions:
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
-    
+
     strategy:
       matrix:
         node-version: [18.x, 20.x]
-    
+
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-      
-    - name: Setup Node.js ${{ matrix.node-version }}
-      uses: actions/setup-node@v4
-      with:
-        node-version: ${{ matrix.node-version }}
-        cache: 'npm'
-        cache-dependency-path: 'package-lock.json'
-        
-    - name: Install dependencies
-      run: |
-        npm ci
-        
-    - name: Build the application
-      run: |
-        npm run build 2>/dev/null || echo "No build script found, skipping build step"
-        
-    - name: Run unit tests with coverage and JUnit reports
-      run: |
-        npm run test:ci
-        
-    - name: Publish test results
-      uses: dorny/test-reporter@v1
-      if: success() || failure()
-      with:
-        name: Jest Test Results
-        path: coverage/junit.xml
-        reporter: jest-junit
-        fail-on-error: true
-        
-    - name: Upload test results to GitHub
-      uses: actions/upload-artifact@v4
-      if: always()
-      with:
-        name: test-results-node-${{ matrix.node-version }}
-        path: |
-          coverage/
-        retention-days: 30
-        
-    - name: Create deployment package
-      run: |
-        
-        # Create a clean deployment package excluding dev dependencies and test files
-        mkdir -p ../deployment-package
-        cp -r public/ ../deployment-package/
-        cp server.js ../deployment-package/
-        cp package.json ../deployment-package/
-        cp package-lock.json ../deployment-package/
-        cp README.md ../deployment-package/
-        cp Dockerfile ../deployment-package/ 2>/dev/null || echo "No Dockerfile found"
-        
-        # Create package.json for production (remove dev dependencies)
-        cd ../deployment-package
-        npm pkg delete devDependencies
-        
-        # Create zip archive with timestamp and commit hash
-        cd ..
-        zip -r "deployment-package-${GITHUB_SHA:0:7}-$(date +%Y%m%d-%H%M%S).zip" deployment-package/
-        
-    - name: Publish artifacts to GitHub Packages
-      uses: actions/upload-artifact@v4
-      with:
-        name: deployment-package-node-${{ matrix.node-version }}-${{ github.run_number }}
-        path: deployment-package-${GITHUB_SHA:0:7}-*.zip
-        retention-days: 90
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+          cache-dependency-path: 'package-lock.json'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build the application (optional)
+        run: |
+          npm run build 2>/dev/null || echo "No build script found, skipping build step"
+
+      - name: Run unit tests with coverage and JUnit reports
+        # If you're using jest-junit, this env var makes sure the XML lands where the reporter expects.
+        env:
+          JEST_JUNIT_OUTPUT: coverage/junit.xml
+        run: npm run test:ci
+
+      - name: Publish test results to Checks
+        uses: dorny/test-reporter@v1
+        if: always()
+        with:
+          name: Jest Test Results
+          path: coverage/junit.xml
+          reporter: jest-junit
+          fail-on-error: true
+
+      - name: Upload test results to GitHub
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results-node-${{ matrix.node-version }}
+          path: coverage/
+          retention-days: 30
+
+      - name: Create deployment package
+        run: |
+          set -euo pipefail
+          STAGING="$GITHUB_WORKSPACE/deployment-package"
+          rm -rf "$STAGING"
+          mkdir -p "$STAGING"
+
+          # Copy key app files into a clean staging folder
+          [ -d public ] && cp -r public "$STAGING/" || echo "No public/ directory found"
+          [ -f server.js ] && cp server.js "$STAGING/" || echo "No server.js found"
+          cp package.json "$STAGING/"
+          cp package-lock.json "$STAGING/"
+          [ -f README.md ] && cp README.md "$STAGING/" || true
+          [ -f Dockerfile ] && cp Dockerfile "$STAGING/" || echo "No Dockerfile found"
+
+          # Create prod-only package.json (no devDependencies). This does NOT install deps.
+          (cd "$STAGING" && npm pkg delete devDependencies || true)
+
+          # Zip stays inside the workspace for reliable artifact upload
+          TS="$(date +%Y%m%d-%H%M%S)"
+          SHORT_SHA="${GITHUB_SHA::7}"
+          ZIP_NAME="deployment-package-${SHORT_SHA}-${TS}.zip"
+          (cd "$GITHUB_WORKSPACE" && zip -r "$ZIP_NAME" "deployment-package")
+          echo "ZIP_NAME=$ZIP_NAME" >> "$GITHUB_ENV"
+
+      - name: Upload deployment package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-package-node-${{ matrix.node-version }}-${{ github.run_number }}
+          path: ${{ env.ZIP_NAME }}
+          retention-days: 90
