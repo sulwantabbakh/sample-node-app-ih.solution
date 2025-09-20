@@ -60,10 +60,10 @@ jobs:
           retention-days: 30
 
       - name: SonarQube Scan
-        uses: sonarqube-quality-gate-action@master
+        uses: SonarSource/sonarqube-scan-action@v6.0.0
         if: matrix.node-version == '18.x'  # Run SonarQube scan only once per workflow
         env:
-          GITHUB_TOKEN: ${{ secrets.SONAR_HOST_URL }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
         with:
           args: >
