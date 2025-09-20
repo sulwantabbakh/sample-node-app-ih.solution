@@ -1,4 +1,4 @@
-name: Continuous Integration Pipeline
+name: Continuous Integration Pipeline with SonarQube
 
 on:
   workflow_dispatch
@@ -13,19 +13,16 @@ permissions:
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
-
-    strategy:
-      matrix:
-        node-version: [18.x, 20.x]
+    environment: dev   
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Node.js ${{ matrix.node-version }}
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: ${{ matrix.node-version }}
+          node-version: 18.x
           cache: 'npm'
           cache-dependency-path: 'package-lock.json'
 
@@ -37,7 +34,6 @@ jobs:
           npm run build 2>/dev/null || echo "No build script found, skipping build step"
 
       - name: Run unit tests with coverage and JUnit reports
-        # If you're using jest-junit, this env var makes sure the XML lands where the reporter expects.
         env:
           JEST_JUNIT_OUTPUT: coverage/junit.xml
         run: npm run test:ci
@@ -55,13 +51,12 @@ jobs:
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: test-results-node-${{ matrix.node-version }}
+          name: test-results-node
           path: coverage/
           retention-days: 30
 
       - name: SonarQube Scan
         uses: SonarSource/sonarqube-scan-action@v6.0.0
-        if: matrix.node-version == '18.x'  # Run SonarQube scan only once per workflow
         env:
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
@@ -86,7 +81,6 @@ jobs:
           rm -rf "$STAGING"
           mkdir -p "$STAGING"
 
-          # Copy key app files into a clean staging folder
           [ -d public ] && cp -r public "$STAGING/" || echo "No public/ directory found"
           [ -d node_modules ] && cp -r node_modules "$STAGING/" || echo "No node_modules/ directory found"
           [ -f server.js ] && cp server.js "$STAGING/" || echo "No server.js found"
@@ -95,10 +89,8 @@ jobs:
           [ -f README.md ] && cp README.md "$STAGING/" || true
           [ -f Dockerfile ] && cp Dockerfile "$STAGING/" || echo "No Dockerfile found"
 
-          # Create prod-only package.json (no devDependencies). This does NOT install deps.
           (cd "$STAGING" && npm pkg delete devDependencies || true)
 
-          # Zip stays inside the workspace for reliable artifact upload
           TS="$(date +%Y%m%d-%H%M%S)"
           SHORT_SHA="${GITHUB_SHA::7}"
           ZIP_NAME="deployment-package-${SHORT_SHA}-${TS}.zip"
@@ -108,6 +100,6 @@ jobs:
       - name: Upload deployment package artifact
         uses: actions/upload-artifact@v4
         with:
-          name: deployment-package-node-${{ matrix.node-version }}-${{ github.run_number }}
+          name: deployment-package-node-${{ github.run_number }}
           path: ${{ env.ZIP_NAME }}
           retention-days: 90
