@@ -63,12 +63,13 @@ jobs:
         uses: sonarqube-quality-gate-action@master
         if: matrix.node-version == '18.x'  # Run SonarQube scan only once per workflow
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.SONAR_HOST_URL }}
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
         with:
           args: >
             -Dsonar.projectKey=${{ github.repository }}
-            -Dsonar.organization=${{ secrets.SONAR_ORGANIZATION }}
+            -Dsonar.organization=sda
+            -Dsonar.token=${{ secrets.SONAR_TOKEN }}
             -Dsonar.host.url=${{ secrets.SONAR_HOST_URL }}
             -Dsonar.javascript.lcov.reportPaths=coverage/lcov.info
             -Dsonar.testExecutionReportPaths=coverage/junit.xml
@@ -87,6 +88,7 @@ jobs:
 
           # Copy key app files into a clean staging folder
           [ -d public ] && cp -r public "$STAGING/" || echo "No public/ directory found"
+          [ -d node_modules ] && cp -r node_modules "$STAGING/" || echo "No node_modules/ directory found"
           [ -f server.js ] && cp server.js "$STAGING/" || echo "No server.js found"
           cp package.json "$STAGING/"
           cp package-lock.json "$STAGING/"
