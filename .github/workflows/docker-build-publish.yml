@@ -4,6 +4,13 @@ name: Build, Test, and Deploy to Azure Container Apps
 on:
   # Allow manual trigger 
   workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+  checks: write
+  pull-requests: write
+  id-token: write 
       
 jobs:
   build-test-and-deploy:
