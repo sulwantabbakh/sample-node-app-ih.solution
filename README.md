@@ -161,16 +161,39 @@ The application can be configured using environment variables:
 
 ### Docker Deployment
 
-Create a `Dockerfile`:
+The application includes a `Dockerfile` for containerized deployment:
 ```dockerfile
-FROM node:18-alpine
+FROM node:22-alpine
 WORKDIR /app
 COPY package*.json ./
-RUN npm ci --only=production
+RUN npm install
 COPY . .
 EXPOSE 3000
 CMD ["npm", "start"]
 ```
+
+#### GitHub Actions Docker Workflow
+
+The repository includes a comprehensive GitHub Actions workflow (`docker-build-publish.yml`) that:
+
+1. **Runs Unit Tests**: Executes the full test suite with coverage reporting
+2. **Builds Multi-Platform Images**: Creates Docker images for both AMD64 and ARM64 architectures
+3. **Publishes to GitHub Container Registry**: Automatically pushes images to `ghcr.io`
+4. **Security Scanning**: Performs vulnerability scanning with Trivy
+5. **Smart Tagging**: Automatically tags images based on branch, commit SHA, and semantic versioning
+
+**Workflow Triggers**:
+- Push to `main` or `develop` branches
+- Pull requests to `main`
+- Manual workflow dispatch
+
+**Image Tags Generated**:
+- `latest` (for main branch)
+- `develop` (for develop branch)
+- `{branch}-{commit-sha}` (for feature branches)
+- Semantic version tags (if using git tags)
+
+**Container Registry**: Images are published to `ghcr.io/{owner}/{repository}`
 
 ### Static Hosting
 
