@@ -171,8 +171,8 @@ jobs:
             echo "::add-mask::$SAS"
             echo "PACKAGE_SAS_URL=$SAS" >> "$GITHUB_ENV"
 
-      # -------- VM: install Node 22 + PM2, download & run --------
-      - name: Deploy on Azure VM (PM2 + Node 22)
+      # -------- VM: install Node 22 + PM2 (sh-compatible), download & run --------
+      - name: Deploy on Azure VM (PM2 + Node 22, sh-compatible)
         if: ${{ success() }}
         uses: azure/cli@v2.1.0
         env:
@@ -187,12 +187,13 @@ jobs:
           inlineScript: |
             set -euo pipefail
             : "${PACKAGE_SAS_URL:?PACKAGE_SAS_URL missing}"
+
             az vm run-command invoke \
               --resource-group "$AZURE_RESOURCE_GROUP" \
               --name "$AZURE_VM_NAME" \
               --command-id RunShellScript \
               --scripts "
-                set -euo pipefail
+                set -eu
                 PACKAGE_SAS_URL='${PACKAGE_SAS_URL}'
                 APP_USER='${APP_USER:-azureuser}'
                 APP_DIR='${APP_DIR:-/opt/myapp}'
@@ -202,11 +203,19 @@ jobs:
                 TMP=/tmp
                 ZIP_FILE=\$TMP/\$(basename \"\$PACKAGE_SAS_URL\" | cut -d'?' -f1)
 
+                # Base tools
                 sudo apt-get update -y
                 sudo apt-get install -y curl unzip ca-certificates gnupg jq
 
                 # Node 22.x
-                if ! command -v node >/dev/null 2>&1 || [ \"\$(node -v | sed 's/v\\([0-9]*\\).*/\\1/')\" -lt 22 ]; then
+                need_node=0
+                if ! command -v node >/dev/null 2>&1; then
+                  need_node=1
+                else
+                  major=\$(node -v 2>/dev/null | sed 's/^v\\([0-9][0-9]*\\).*/\\1/')
+                  if [ \"\$major\" -lt 22 ]; then need_node=1; fi
+                fi
+                if [ \"\$need_node\" -eq 1 ]; then
                   curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
                   sudo apt-get install -y nodejs
                 fi
@@ -214,38 +223,42 @@ jobs:
                 # PM2
                 sudo npm i -g pm2@latest
 
+                # App dir
                 sudo mkdir -p \"\$CURRENT_DIR\"
                 sudo chown -R \"\$APP_USER\":\"\$APP_USER\" \"\$APP_DIR\"
 
-                echo 'Downloading artifact...'
+                # Download & unzip
                 curl -fSL \"\$PACKAGE_SAS_URL\" -o \"\$ZIP_FILE\"
-
-                echo 'Unzipping...'
                 sudo unzip -o \"\$ZIP_FILE\" -d \"\$CURRENT_DIR\"
                 if [ -d \"\$CURRENT_DIR/deployment-package\" ]; then
-                  shopt -s dotglob
-                  sudo mv \"\$CURRENT_DIR\"/deployment-package/* \"\$CURRENT_DIR\"/
-                  sudo rm -rf \"\$CURRENT_DIR\"/deployment-package
-                  shopt -u dotglob
+                  set -f
+                  for f in \"\$CURRENT_DIR\"/deployment-package/* \"\$CURRENT_DIR\"/deployment-package/.*; do
+                    base=\$(basename \"\$f\")
+                    [ \"\$base\" = \".\" ] || [ \"\$base\" = \"..\" ] || sudo mv \"\$f\" \"\$CURRENT_DIR\"/
+                  done
+                  set +f
+                  sudo rm -rf \"\$CURRENT_DIR/deployment-package\"
                 fi
                 sudo chown -R \"\$APP_USER\":\"\$APP_USER\" \"\$CURRENT_DIR\"
 
+                # Install prod deps
                 if [ -f \"\$CURRENT_DIR/package.json\" ]; then
-                  sudo -u \"\$APP_USER\" bash -lc \"cd '\$CURRENT_DIR' && (npm ci --omit=dev || npm i --omit=dev)\"
+                  sudo -H -u \"\$APP_USER\" sh -c \"cd '\$CURRENT_DIR' && (npm ci --omit=dev || npm i --omit=dev)\"
                 fi
 
-                # Start with PM2: prefer npm start, else server.js
-                STARTED=0
-                if [ -f \"\$CURRENT_DIR/package.json\" ] && jq -e '.scripts.start' \"\$CURRENT_DIR/package.json\" >/dev/null 2>&1; then
-                  sudo -u \"\$APP_USER\" pm2 delete \"\$APP_NAME\" >/dev/null 2>&1 || true
-                  sudo -u \"\$APP_USER\" pm2 start npm --name \"\$APP_NAME\" -- start --prefix \"\$CURRENT_DIR\" && STARTED=1
+                # PM2 start: prefer npm start, else server.js
+                started=0
+                if [ -f \"\$CURRENT_DIR/package.json\" ] && grep -q '\"start\"' \"\$CURRENT_DIR/package.json\"; then
+                  sudo -H -u \"\$APP_USER\" pm2 delete \"\$APP_NAME\" >/dev/null 2>&1 || true
+                  sudo -H -u \"\$APP_USER\" pm2 start npm --name \"\$APP_NAME\" -- start --prefix \"\$CURRENT_DIR\"
+                  started=1
                 fi
-                if [ \"\$STARTED\" -eq 0 ] && [ -f \"\$CURRENT_DIR/server.js\" ]; then
-                  sudo -u \"\$APP_USER\" pm2 delete \"\$APP_NAME\" >/dev/null 2>&1 || true
-                  sudo -u \"\$APP_USER\" pm2 start \"\$CURRENT_DIR/server.js\" --name \"\$APP_NAME\"
-                  STARTED=1
+                if [ \"\$started\" -eq 0 ] && [ -f \"\$CURRENT_DIR/server.js\" ]; then
+                  sudo -H -u \"\$APP_USER\" pm2 delete \"\$APP_NAME\" >/dev/null 2>&1 || true
+                  sudo -H -u \"\$APP_USER\" pm2 start \"\$CURRENT_DIR/server.js\" --name \"\$APP_NAME\"
+                  started=1
                 fi
-                if [ \"\$STARTED\" -eq 0 ]; then
+                if [ \"\$started\" -eq 0 ]; then
                   echo 'No start script or server.js found.' >&2
                   ls -la \"\$CURRENT_DIR\"
                   exit 1
@@ -253,15 +266,9 @@ jobs:
 
                 # PM2 autostart on boot
                 sudo env PATH=\$PATH:/usr/bin pm2 startup systemd -u \"\$APP_USER\" --hp \"/home/\$APP_USER\" >/dev/null
-                sudo -u \"\$APP_USER\" pm2 save
+                sudo -H -u \"\$APP_USER\" pm2 save
 
-                # Optional: quick local health check
-                if command -v curl >/dev/null 2>&1; then
-                  set +e
-                  curl -fsS \"http://127.0.0.1:\$APP_PORT\" | head -c 200 || true
-                  echo
-                  set -e
-                fi
-
-                echo 'Deployment finished.'
+                # Quick diagnostics
+                sudo -H -u \"\$APP_USER\" pm2 ls || true
+                if command -v ss >/dev/null 2>&1; then sudo ss -ltnp | grep \":\$APP_PORT\" || true; fi
               "
