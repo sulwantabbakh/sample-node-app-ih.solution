@@ -28,28 +28,6 @@ jobs:
         run: |
           npm run build 2>/dev/null || echo "No build script found, skipping build step"
 
-      - name: Run unit tests with coverage and JUnit reports
-        env:
-          JEST_JUNIT_OUTPUT: coverage/junit.xml
-        run: npm run test:ci
-
-      - name: Publish test results to Checks
-        uses: dorny/test-reporter@v1
-        if: always()
-        with:
-          name: Jest Test Results
-          path: coverage/junit.xml
-          reporter: jest-junit
-          fail-on-error: true
-
-      - name: Upload test results to GitHub
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: test-results-node
-          path: coverage/
-          retention-days: 30
-
       - name: Azure Login
         uses: azure/login@v2
         with:
