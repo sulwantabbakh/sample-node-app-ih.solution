@@ -1,8 +1,6 @@
 name: Build, Test, and Deploy to Azure Container Apps
 
-# When this action will be executed
 on:
-  # Allow manual trigger 
   workflow_dispatch:
 
 permissions:
@@ -10,8 +8,8 @@ permissions:
   actions: read
   checks: write
   pull-requests: write
-  id-token: write 
-      
+  id-token: write  # keep only if you plan to use OIDC; otherwise can remove
+
 jobs:
   build-test-and-deploy:
     runs-on: ubuntu-latest
@@ -25,15 +23,14 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 22.x
-          cache: 'npm'
-          cache-dependency-path: 'package-lock.json'
+          cache: npm
+          cache-dependency-path: package-lock.json
 
       - name: Install dependencies
         run: npm ci
 
       - name: Build the application (optional)
-        run: |
-          npm run build 2>/dev/null || echo "No build script found, skipping build step"
+        run: npm run build 2>/dev/null || echo "No build script found, skipping build step"
 
       - name: Azure Login
         uses: azure/login@v2
@@ -43,12 +40,12 @@ jobs:
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
           client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
 
-      - name: Build and push container image to registry
+      - name: Build and push container image to registry + deploy to ACA
         uses: azure/container-apps-deploy-action@v2
         with:
           appSourcePath: ${{ github.workspace }}
-          _dockerfilePathKey_: _dockerfilePath_
-          _targetLabelKey_: _targetLabel_
+          # dockerfilePath: ./Dockerfile        # uncomment if your Dockerfile isn't at the root
+          # target: <your-target-stage>         # uncomment if using a multi-stage target
           registryUrl: docker.io
           registryUsername: ${{ secrets.DOCKERHUB_USERNAME }}
           registryPassword: ${{ secrets.DOCKERHUB_TOKEN }}
