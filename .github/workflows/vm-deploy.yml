@@ -181,13 +181,16 @@ jobs:
             echo "::add-mask::$SAS"
             echo "PACKAGE_SAS_URL=$SAS" >> "$GITHUB_ENV"
 
-      - name: Deploy on Azure VM (download & restart)
+      - name: Deploy on Azure VM (PM2 + Node 22)
         if: ${{ success() }}
         uses: azure/cli@v2.1.0
         env:
           AZURE_RESOURCE_GROUP: ${{ secrets.AZURE_RESOURCE_GROUP }}
           AZURE_VM_NAME: ${{ secrets.AZURE_VM_NAME }}
           PACKAGE_SAS_URL: ${{ env.PACKAGE_SAS_URL }}
+          APP_USER: azureuser            # change if your admin user differs
+          APP_DIR: /opt/myapp
+          APP_NAME: myapp
         with:
           inlineScript: |
             set -euo pipefail
@@ -197,23 +200,75 @@ jobs:
               --command-id RunShellScript \
               --scripts "
                 set -euo pipefail
-                DEPLOY_DIR=/opt/myapp
+                PACKAGE_SAS_URL='$PACKAGE_SAS_URL'
+                APP_USER='${APP_USER:-azureuser}'
+                APP_DIR='${APP_DIR:-/opt/myapp}'
+                APP_NAME='${APP_NAME:-myapp}'
+                CURRENT_DIR=\"\$APP_DIR/current\"
                 TMP=/tmp
-                FILE=\$TMP/$(basename \"$PACKAGE_SAS_URL\" | cut -d'?' -f1)
+                ZIP_FILE=\$TMP/\$(basename \"\$PACKAGE_SAS_URL\" | cut -d'?' -f1)
 
-                if ! command -v curl >/dev/null 2>&1; then sudo apt-get update -y && sudo apt-get install -y curl; fi
-                if ! command -v unzip >/dev/null 2>&1; then sudo apt-get update -y && sudo apt-get install -y unzip; fi
+                echo '==> Update base packages & tools'
+                sudo apt-get update -y
+                sudo apt-get install -y curl unzip ca-certificates gnupg
 
-                echo 'Downloading package...'
-                curl -fSL \"$PACKAGE_SAS_URL\" -o \"\$FILE\"
-
-                sudo mkdir -p \$DEPLOY_DIR
-                sudo unzip -o \"\$FILE\" -d \$DEPLOY_DIR
-
-                if sudo systemctl --quiet is-enabled myapp.service 2>/dev/null; then
-                  sudo systemctl restart myapp.service
-                  echo 'Restarted myapp.service'
-                else
-                  echo 'myapp.service not found — start your app as appropriate.'
+                echo '==> Install Node.js 22 (NodeSource)'
+                if ! command -v node >/dev/null 2>&1 || [ \"\$(node -v 2>/dev/null | sed 's/v\\([0-9]*\\).*/\\1/')\" -lt 22 ]; then
+                  curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+                  sudo apt-get install -y nodejs
                 fi
+
+                echo '==> Install PM2 globally'
+                sudo npm i -g pm2@latest
+
+                echo '==> Prepare app directory'
+                sudo mkdir -p \"\$CURRENT_DIR\"
+                sudo chown -R \"\$APP_USER\":\"\$APP_USER\" \"\$APP_DIR\"
+
+                echo '==> Download deployment package'
+                curl -fSL \"\$PACKAGE_SAS_URL\" -o \"\$ZIP_FILE\"
+
+                echo '==> Unzip into current release'
+                sudo unzip -o \"\$ZIP_FILE\" -d \"\$CURRENT_DIR\"
+                # If ZIP has a root 'deployment-package/' folder, flatten it
+                if [ -d \"\$CURRENT_DIR/deployment-package\" ]; then
+                  shopt -s dotglob
+                  sudo mv \"\$CURRENT_DIR\"/deployment-package/* \"\$CURRENT_DIR\"/
+                  sudo rm -rf \"\$CURRENT_DIR\"/deployment-package
+                  shopt -u dotglob
+                fi
+                sudo chown -R \"\$APP_USER\":\"\$APP_USER\" \"\$CURRENT_DIR\"
+
+                echo '==> Install production dependencies (if package.json exists)'
+                if [ -f \"\$CURRENT_DIR/package.json\" ]; then
+                  sudo -u \"\$APP_USER\" bash -lc \"cd '\$CURRENT_DIR' && (npm ci --omit=dev || npm i --omit=dev)\"
+                fi
+
+                echo '==> Start (or restart) app with PM2'
+                # Prefer npm start if present, otherwise run server.js
+                STARTED=0
+                if [ -f \"\$CURRENT_DIR/package.json\" ] && grep -q '\"start\"' \"\$CURRENT_DIR/package.json\"; then
+                  sudo -u \"\$APP_USER\" pm2 delete \"\$APP_NAME\" >/dev/null 2>&1 || true
+                  sudo -u \"\$APP_USER\" pm2 start npm --name \"\$APP_NAME\" -- start --prefix \"\$CURRENT_DIR\" && STARTED=1
+                fi
+                if [ \"\$STARTED\" -eq 0 ]; then
+                  if [ -f \"\$CURRENT_DIR/server.js\" ]; then
+                    sudo -u \"\$APP_USER\" pm2 delete \"\$APP_NAME\" >/dev/null 2>&1 || true
+                    sudo -u \"\$APP_USER\" pm2 start \"\$CURRENT_DIR/server.js\" --name \"\$APP_NAME\"
+                    STARTED=1
+                  fi
+                fi
+                if [ \"\$STARTED\" -eq 0 ]; then
+                  echo 'No start script or server.js found in current directory.' >&2
+                  exit 1
+                fi
+
+                echo '==> Enable PM2 startup & save process list'
+                sudo env PATH=\$PATH:/usr/bin pm2 startup systemd -u \"\$APP_USER\" --hp \"/home/\$APP_USER\" >/dev/null
+                sudo -u \"\$APP_USER\" pm2 save
+
+                echo '==> PM2 list'
+                sudo -u \"\$APP_USER\" pm2 ls || true
+
+                echo '==> Done'
               "
