@@ -1,14 +1,21 @@
-name: Deploy Node App on Azure VM (Client Secret + Storage Key)
+name: Deploy Node App on Azure VM (Client Secret + Blob ConnString + PM2)
 
 on:
   workflow_dispatch:
+
+# Required secrets:
+# AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID, AZURE_CLIENT_SECRET
+# AZURE_RESOURCE_GROUP, AZURE_VM_NAME
+# AZ_STORAGE_CONN  (Storage account connection string)
+# AZ_STORAGE_CONTAINER (e.g., releases)
+# SONAR_HOST_URL, SONAR_TOKEN (optional if using SonarQube)
 
 permissions:
   contents: read
   actions: read
   checks: write
   pull-requests: write
-  id-token: write   # harmless here; not using OIDC in this workflow
+  id-token: write   # harmless here; OIDC not used
 
 jobs:
   build-and-test:
@@ -84,8 +91,8 @@ jobs:
           [ -d public ] && cp -r public "$STAGING/" || echo "No public/ directory found"
           [ -d node_modules ] && cp -r node_modules "$STAGING/" || echo "No node_modules/ directory found"
           [ -f server.js ] && cp server.js "$STAGING/" || echo "No server.js found"
-          cp package.json "$STAGING/"
-          cp package-lock.json "$STAGING/"
+          cp package.json "$STAGING/" || true
+          cp package-lock.json "$STAGING/" || true
           [ -f README.md ] && cp README.md "$STAGING/" || true
           [ -f Dockerfile ] && cp Dockerfile "$STAGING/" || echo "No Dockerfile found"
 
@@ -112,75 +119,50 @@ jobs:
           path: ${{ env.ZIP_NAME }}
           retention-days: 90
 
-      - name: Upload package to Blob (key-based, hardened)
+      # ---------- Upload ZIP to Blob using connection string ----------
+      - name: Upload package to Blob (connection string)
         if: ${{ success() }}
         uses: azure/cli@v2.1.0
         env:
           ZIP_NAME: ${{ env.ZIP_NAME }}
-          AZ_STORAGE_ACCOUNT: ${{ secrets.AZ_STORAGE_ACCOUNT }}
           AZ_STORAGE_CONTAINER: ${{ secrets.AZ_STORAGE_CONTAINER }}
-          AZ_STORAGE_KEY: ${{ secrets.AZ_STORAGE_KEY }}
+          AZ_STORAGE_CONN: ${{ secrets.AZ_STORAGE_CONN }}
         with:
           inlineScript: |
             set -euo pipefail
-
-            # --- Guards ---
-            : "${AZ_STORAGE_ACCOUNT:?AZ_STORAGE_ACCOUNT missing}"
             : "${AZ_STORAGE_CONTAINER:?AZ_STORAGE_CONTAINER missing}"
-            : "${AZ_STORAGE_KEY:?AZ_STORAGE_KEY missing}"
+            : "${AZ_STORAGE_CONN:?AZ_STORAGE_CONN missing}"
             : "${ZIP_NAME:?ZIP_NAME missing}"
-
-            # Trim stray whitespace/newlines in key
-            CLEAN_KEY="$(printf %s "$AZ_STORAGE_KEY" | tr -d '\r\n')"
-            export AZ_STORAGE_KEY="$CLEAN_KEY"
-
-            # Heuristic sanity check
-            KEYLEN=${#AZ_STORAGE_KEY}
-            if [ "$KEYLEN" -lt 60 ]; then
-              echo "Storage key looks too short ($KEYLEN chars). Re-copy from Portal -> Access keys." >&2
-              exit 1
-            fi
 
             # Ensure container exists (idempotent)
             az storage container create \
               --name "$AZ_STORAGE_CONTAINER" \
-              --account-name "$AZ_STORAGE_ACCOUNT" \
-              --account-key "$AZ_STORAGE_KEY" \
+              --connection-string "$AZ_STORAGE_CONN" \
               --only-show-errors 1>/dev/null
 
-            # Preflight validate key by listing (noisy failures avoided)
-            if ! az storage blob list \
-                  --account-name "$AZ_STORAGE_ACCOUNT" \
-                  --account-key "$AZ_STORAGE_KEY" \
-                  --container-name "$AZ_STORAGE_CONTAINER" \
-                  --num-results 1 --only-show-errors 1>/dev/null; then
-              echo "❌ Storage auth failed. Check account name, container, and AZ_STORAGE_KEY." >&2
-              exit 1
-            fi
-
-            echo "✅ Storage key validated. Uploading $ZIP_NAME ..."
+            echo "Uploading $ZIP_NAME ..."
             az storage blob upload \
-              --account-name "$AZ_STORAGE_ACCOUNT" \
-              --account-key "$AZ_STORAGE_KEY" \
               --container-name "$AZ_STORAGE_CONTAINER" \
               --file "$ZIP_NAME" \
               --name "$ZIP_NAME" \
               --overwrite true \
+              --connection-string "$AZ_STORAGE_CONN" \
               --only-show-errors
 
-            # Short-lived SAS URL for VM download
+            # Short-lived SAS URL for VM download (1h)
             SAS=$(az storage blob generate-sas \
-              --account-name "$AZ_STORAGE_ACCOUNT" \
-              --account-key "$AZ_STORAGE_KEY" \
               --container-name "$AZ_STORAGE_CONTAINER" \
               --name "$ZIP_NAME" \
               --permissions r \
               --expiry "$(date -u -d '+1 hour' '+%Y-%m-%dT%H:%MZ')" \
-              --https-only --full-uri -o tsv)
+              --https-only \
+              --full-uri -o tsv \
+              --connection-string "$AZ_STORAGE_CONN")
 
             echo "::add-mask::$SAS"
             echo "PACKAGE_SAS_URL=$SAS" >> "$GITHUB_ENV"
 
+      # ---------- VM: install Node 22 + PM2, download & run ----------
       - name: Deploy on Azure VM (PM2 + Node 22)
         if: ${{ success() }}
         uses: azure/cli@v2.1.0
@@ -188,49 +170,49 @@ jobs:
           AZURE_RESOURCE_GROUP: ${{ secrets.AZURE_RESOURCE_GROUP }}
           AZURE_VM_NAME: ${{ secrets.AZURE_VM_NAME }}
           PACKAGE_SAS_URL: ${{ env.PACKAGE_SAS_URL }}
-          APP_USER: azureuser            # change if your admin user differs
+          APP_USER: azureuser      # change if different
           APP_DIR: /opt/myapp
           APP_NAME: myapp
+          APP_PORT: 3000           # change to your app's port
         with:
           inlineScript: |
             set -euo pipefail
+            : "${PACKAGE_SAS_URL:?PACKAGE_SAS_URL missing}"
             az vm run-command invoke \
               --resource-group "$AZURE_RESOURCE_GROUP" \
               --name "$AZURE_VM_NAME" \
               --command-id RunShellScript \
               --scripts "
                 set -euo pipefail
-                PACKAGE_SAS_URL='$PACKAGE_SAS_URL'
+                PACKAGE_SAS_URL='${PACKAGE_SAS_URL}'
                 APP_USER='${APP_USER:-azureuser}'
                 APP_DIR='${APP_DIR:-/opt/myapp}'
                 APP_NAME='${APP_NAME:-myapp}'
+                APP_PORT='${APP_PORT:-3000}'
                 CURRENT_DIR=\"\$APP_DIR/current\"
                 TMP=/tmp
                 ZIP_FILE=\$TMP/\$(basename \"\$PACKAGE_SAS_URL\" | cut -d'?' -f1)
 
-                echo '==> Update base packages & tools'
                 sudo apt-get update -y
-                sudo apt-get install -y curl unzip ca-certificates gnupg
+                sudo apt-get install -y curl unzip ca-certificates gnupg jq
 
-                echo '==> Install Node.js 22 (NodeSource)'
-                if ! command -v node >/dev/null 2>&1 || [ \"\$(node -v 2>/dev/null | sed 's/v\\([0-9]*\\).*/\\1/')\" -lt 22 ]; then
+                # Node 22.x
+                if ! command -v node >/dev/null 2>&1 || [ \"\$(node -v | sed 's/v\\([0-9]*\\).*/\\1/')\" -lt 22 ]; then
                   curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
                   sudo apt-get install -y nodejs
                 fi
 
-                echo '==> Install PM2 globally'
+                # PM2
                 sudo npm i -g pm2@latest
 
-                echo '==> Prepare app directory'
                 sudo mkdir -p \"\$CURRENT_DIR\"
                 sudo chown -R \"\$APP_USER\":\"\$APP_USER\" \"\$APP_DIR\"
 
-                echo '==> Download deployment package'
+                echo 'Downloading artifact...'
                 curl -fSL \"\$PACKAGE_SAS_URL\" -o \"\$ZIP_FILE\"
 
-                echo '==> Unzip into current release'
+                echo 'Unzipping...'
                 sudo unzip -o \"\$ZIP_FILE\" -d \"\$CURRENT_DIR\"
-                # If ZIP has a root 'deployment-package/' folder, flatten it
                 if [ -d \"\$CURRENT_DIR/deployment-package\" ]; then
                   shopt -s dotglob
                   sudo mv \"\$CURRENT_DIR\"/deployment-package/* \"\$CURRENT_DIR\"/
@@ -239,36 +221,38 @@ jobs:
                 fi
                 sudo chown -R \"\$APP_USER\":\"\$APP_USER\" \"\$CURRENT_DIR\"
 
-                echo '==> Install production dependencies (if package.json exists)'
                 if [ -f \"\$CURRENT_DIR/package.json\" ]; then
                   sudo -u \"\$APP_USER\" bash -lc \"cd '\$CURRENT_DIR' && (npm ci --omit=dev || npm i --omit=dev)\"
                 fi
 
-                echo '==> Start (or restart) app with PM2'
-                # Prefer npm start if present, otherwise run server.js
+                # Start with PM2: prefer npm start, else server.js
                 STARTED=0
-                if [ -f \"\$CURRENT_DIR/package.json\" ] && grep -q '\"start\"' \"\$CURRENT_DIR/package.json\"; then
+                if [ -f \"\$CURRENT_DIR/package.json\" ] && jq -e '.scripts.start' \"\$CURRENT_DIR/package.json\" >/dev/null 2>&1; then
                   sudo -u \"\$APP_USER\" pm2 delete \"\$APP_NAME\" >/dev/null 2>&1 || true
                   sudo -u \"\$APP_USER\" pm2 start npm --name \"\$APP_NAME\" -- start --prefix \"\$CURRENT_DIR\" && STARTED=1
                 fi
-                if [ \"\$STARTED\" -eq 0 ]; then
-                  if [ -f \"\$CURRENT_DIR/server.js\" ]; then
-                    sudo -u \"\$APP_USER\" pm2 delete \"\$APP_NAME\" >/dev/null 2>&1 || true
-                    sudo -u \"\$APP_USER\" pm2 start \"\$CURRENT_DIR/server.js\" --name \"\$APP_NAME\"
-                    STARTED=1
-                  fi
+                if [ \"\$STARTED\" -eq 0 ] && [ -f \"\$CURRENT_DIR/server.js\" ]; then
+                  sudo -u \"\$APP_USER\" pm2 delete \"\$APP_NAME\" >/dev/null 2>&1 || true
+                  sudo -u \"\$APP_USER\" pm2 start \"\$CURRENT_DIR/server.js\" --name \"\$APP_NAME\"
+                  STARTED=1
                 fi
                 if [ \"\$STARTED\" -eq 0 ]; then
-                  echo 'No start script or server.js found in current directory.' >&2
+                  echo 'No start script or server.js found.' >&2
+                  ls -la \"\$CURRENT_DIR\"
                   exit 1
                 fi
 
-                echo '==> Enable PM2 startup & save process list'
+                # PM2 autostart on boot
                 sudo env PATH=\$PATH:/usr/bin pm2 startup systemd -u \"\$APP_USER\" --hp \"/home/\$APP_USER\" >/dev/null
                 sudo -u \"\$APP_USER\" pm2 save
 
-                echo '==> PM2 list'
-                sudo -u \"\$APP_USER\" pm2 ls || true
+                # Optional: quick local health check
+                if command -v curl >/dev/null 2>&1; then
+                  set +e
+                  curl -fsS \"http://127.0.0.1:\$APP_PORT\" | head -c 200 || true
+                  echo
+                  set -e
+                fi
 
-                echo '==> Done'
+                echo 'Deployment finished.'
               "
