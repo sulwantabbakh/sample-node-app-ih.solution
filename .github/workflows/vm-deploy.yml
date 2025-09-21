@@ -1,14 +1,13 @@
-name: Deploy Node App on Azure VM (Client Secret + Blob ConnString + PM2)
+name: Deploy Node App on Azure VM (Client Secret + Account Key + PM2)
 
 on:
   workflow_dispatch:
 
-# Required secrets:
+# Required repo secrets:
 # AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID, AZURE_CLIENT_SECRET
 # AZURE_RESOURCE_GROUP, AZURE_VM_NAME
-# AZ_STORAGE_CONN  (Storage account connection string)
-# AZ_STORAGE_CONTAINER (e.g., releases)
-# SONAR_HOST_URL, SONAR_TOKEN (optional if using SonarQube)
+# AZ_STORAGE_ACCOUNT, AZ_STORAGE_CONTAINER, AZ_STORAGE_KEY
+# (Optional) SONAR_HOST_URL, SONAR_TOKEN
 
 permissions:
   contents: read
@@ -91,8 +90,8 @@ jobs:
           [ -d public ] && cp -r public "$STAGING/" || echo "No public/ directory found"
           [ -d node_modules ] && cp -r node_modules "$STAGING/" || echo "No node_modules/ directory found"
           [ -f server.js ] && cp server.js "$STAGING/" || echo "No server.js found"
-          cp package.json "$STAGING/" || true
-          cp package-lock.json "$STAGING/" || true
+          [ -f package.json ] && cp package.json "$STAGING/" || true
+          [ -f package-lock.json ] && cp package-lock.json "$STAGING/" || true
           [ -f README.md ] && cp README.md "$STAGING/" || true
           [ -f Dockerfile ] && cp Dockerfile "$STAGING/" || echo "No Dockerfile found"
 
@@ -119,50 +118,60 @@ jobs:
           path: ${{ env.ZIP_NAME }}
           retention-days: 90
 
-      # ---------- Upload ZIP to Blob using connection string ----------
-      - name: Upload package to Blob (connection string)
+      # -------- Upload ZIP to Blob using account key; emit 1h SAS URL --------
+      - name: Upload package to Blob (key-based)
         if: ${{ success() }}
         uses: azure/cli@v2.1.0
         env:
           ZIP_NAME: ${{ env.ZIP_NAME }}
+          AZ_STORAGE_ACCOUNT: ${{ secrets.AZ_STORAGE_ACCOUNT }}
           AZ_STORAGE_CONTAINER: ${{ secrets.AZ_STORAGE_CONTAINER }}
-          AZ_STORAGE_CONN: ${{ secrets.AZ_STORAGE_CONN }}
+          AZ_STORAGE_KEY: ${{ secrets.AZ_STORAGE_KEY }}
         with:
           inlineScript: |
             set -euo pipefail
+            : "${AZ_STORAGE_ACCOUNT:?AZ_STORAGE_ACCOUNT missing}"
             : "${AZ_STORAGE_CONTAINER:?AZ_STORAGE_CONTAINER missing}"
-            : "${AZ_STORAGE_CONN:?AZ_STORAGE_CONN missing}"
+            : "${AZ_STORAGE_KEY:?AZ_STORAGE_KEY missing}"
             : "${ZIP_NAME:?ZIP_NAME missing}"
 
-            # Ensure container exists (idempotent)
+            AZ_STORAGE_KEY="$(printf %s "$AZ_STORAGE_KEY" | tr -d '\r\n')"
+            export AZ_STORAGE_KEY
+
             az storage container create \
               --name "$AZ_STORAGE_CONTAINER" \
-              --connection-string "$AZ_STORAGE_CONN" \
+              --account-name "$AZ_STORAGE_ACCOUNT" \
+              --account-key "$AZ_STORAGE_KEY" \
               --only-show-errors 1>/dev/null
+
+            az storage blob list \
+              --account-name "$AZ_STORAGE_ACCOUNT" \
+              --account-key "$AZ_STORAGE_KEY" \
+              --container-name "$AZ_STORAGE_CONTAINER" \
+              --num-results 1 --only-show-errors 1>/dev/null
 
             echo "Uploading $ZIP_NAME ..."
             az storage blob upload \
+              --account-name "$AZ_STORAGE_ACCOUNT" \
+              --account-key "$AZ_STORAGE_KEY" \
               --container-name "$AZ_STORAGE_CONTAINER" \
               --file "$ZIP_NAME" \
               --name "$ZIP_NAME" \
               --overwrite true \
-              --connection-string "$AZ_STORAGE_CONN" \
               --only-show-errors
 
-            # Short-lived SAS URL for VM download (1h)
             SAS=$(az storage blob generate-sas \
+              --account-name "$AZ_STORAGE_ACCOUNT" \
+              --account-key "$AZ_STORAGE_KEY" \
               --container-name "$AZ_STORAGE_CONTAINER" \
               --name "$ZIP_NAME" \
               --permissions r \
               --expiry "$(date -u -d '+1 hour' '+%Y-%m-%dT%H:%MZ')" \
-              --https-only \
-              --full-uri -o tsv \
-              --connection-string "$AZ_STORAGE_CONN")
-
+              --https-only --full-uri -o tsv)
             echo "::add-mask::$SAS"
             echo "PACKAGE_SAS_URL=$SAS" >> "$GITHUB_ENV"
 
-      # ---------- VM: install Node 22 + PM2, download & run ----------
+      # -------- VM: install Node 22 + PM2, download & run --------
       - name: Deploy on Azure VM (PM2 + Node 22)
         if: ${{ success() }}
         uses: azure/cli@v2.1.0
@@ -173,7 +182,7 @@ jobs:
           APP_USER: azureuser      # change if different
           APP_DIR: /opt/myapp
           APP_NAME: myapp
-          APP_PORT: 3000           # change to your app's port
+          APP_PORT: 3000           # change to your app port
         with:
           inlineScript: |
             set -euo pipefail
