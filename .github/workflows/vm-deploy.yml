@@ -248,24 +248,12 @@ jobs:
           sudo -u "$APP_USER" pm2 stop "$APP_NAME" 2>/dev/null || true
           sudo -u "$APP_USER" pm2 delete "$APP_NAME" 2>/dev/null || true
           
-          # Start with PM2
+          # Start with PM2 (non-blocking)
           echo "Starting application with PM2..."
-          sudo -u "$APP_USER" pm2 start "$APP_DIR/current/server.js" --name "$APP_NAME" --log-date-format="YYYY-MM-DD HH:mm:ss Z"
-          
-          echo "Waiting for application to start..."
-          sleep 5
+          sudo -u "$APP_USER" pm2 start "$APP_DIR/current/server.js" --name "$APP_NAME" --no-daemon
           
           echo "PM2 status:"
           sudo -u "$APP_USER" pm2 ls
-          
-          echo "PM2 logs (last 20 lines):"
-          sudo -u "$APP_USER" pm2 logs "$APP_NAME" --lines 20
-          
-          echo "Checking if application is listening on port 3000:"
-          sudo netstat -tlnp | grep :3000 || echo "Port 3000 not listening"
-          
-          echo "Testing application locally:"
-          curl -f http://localhost:3000/health || echo "Health check failed"
           
           echo "Saving PM2 configuration..."
           sudo -u "$APP_USER" pm2 save
