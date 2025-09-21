@@ -225,6 +225,7 @@ jobs:
           
           # Deploy - create symlink
           echo "Creating symlink..."
+          sudo rm -f "$APP_DIR/current"
           sudo ln -sfn "$RELEASE_DIR" "$APP_DIR/current"
           
           # Verify files are in place
