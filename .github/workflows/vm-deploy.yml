@@ -190,33 +190,53 @@ jobs:
                 APP_DIR=\"${APP_DIR:-/opt/myapp}\"
                 APP_NAME=\"${APP_NAME:-myapp}\"
                 APP_USER=\"${APP_USER:-azureuser}\"
-                ZIP_FILE=\"/tmp/$(basename \"${PACKAGE_SAS_URL}\" | cut -d'?' -f1)\"
-                DEST_DIR=\"${APP_DIR}/releases/$(date +%Y%m%d-%H%M%S)\"
+                TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+                ZIP_FILE=\"/tmp/deployment-package-${TIMESTAMP}.zip\"
+                DEST_DIR=\"${APP_DIR}/releases/${TIMESTAMP}\"
                 
                 # Download and extract
+                echo \"Downloading deployment package...\"
                 curl -fSL \"${PACKAGE_SAS_URL}\" -o \"$ZIP_FILE\"
+                
+                echo \"Creating directories...\"
                 sudo mkdir -p \"$DEST_DIR\" \"${APP_DIR}/current\"
+                
+                echo \"Extracting package...\"
                 unzip -o \"$ZIP_FILE\" -d \"$DEST_DIR\"
                 
                 # Flatten deployment-package folder if exists
                 if [ -d \"$DEST_DIR/deployment-package\" ]; then
+                  echo \"Flattening package structure...\"
                   mv \"$DEST_DIR/deployment-package\"/* \"$DEST_DIR\"/ 2>/dev/null || true
                   rmdir \"$DEST_DIR/deployment-package\" 2>/dev/null || true
                 fi
                 
                 # Install deps and setup permissions
+                echo \"Setting permissions...\"
                 sudo chown -R \"$APP_USER:$APP_USER\" \"$APP_DIR\"
+                
+                echo \"Installing dependencies...\"
                 if [ -f \"$DEST_DIR/package.json\" ]; then
                   sudo -u \"$APP_USER\" bash -lc \"cd '$DEST_DIR' && npm ci --omit=dev\"
                 fi
                 
                 # Deploy with PM2
+                echo \"Deploying with PM2...\"
                 ln -sfn \"$DEST_DIR\" \"${APP_DIR}/current\"
+                
                 if pm2 describe \"$APP_NAME\" >/dev/null 2>&1; then
+                  echo \"Restarting existing PM2 process...\"
                   sudo -u \"$APP_USER\" pm2 restart \"$APP_NAME\"
                 else
+                  echo \"Starting new PM2 process...\"
                   sudo -u \"$APP_USER\" pm2 start \"${APP_DIR}/current/server.js\" --name \"$APP_NAME\"
                 fi
+                
+                echo \"Saving PM2 configuration...\"
                 sudo -u \"$APP_USER\" pm2 save
+                
+                echo \"Cleaning up...\"
+                rm -f \"$ZIP_FILE\"
+                
                 echo \"Deployment completed successfully\"
               "
