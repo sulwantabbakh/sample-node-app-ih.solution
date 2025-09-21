@@ -1,20 +1,14 @@
-name: Deploy Node App on Azure VM (Client Secret + Account Key + PM2)
+name: Deploy Node App on Azure VM 
 
 on:
   workflow_dispatch:
-
-# Required repo secrets:
-# AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID, AZURE_CLIENT_SECRET
-# AZURE_RESOURCE_GROUP, AZURE_VM_NAME
-# AZ_STORAGE_ACCOUNT, AZ_STORAGE_CONTAINER, AZ_STORAGE_KEY
-# (Optional) SONAR_HOST_URL, SONAR_TOKEN
 
 permissions:
   contents: read
   actions: read
   checks: write
   pull-requests: write
-  id-token: write   # harmless here; OIDC not used
+  id-token: write   # harmless here; not using OIDC in this workflow
 
 jobs:
   build-and-test:
@@ -90,8 +84,8 @@ jobs:
           [ -d public ] && cp -r public "$STAGING/" || echo "No public/ directory found"
           [ -d node_modules ] && cp -r node_modules "$STAGING/" || echo "No node_modules/ directory found"
           [ -f server.js ] && cp server.js "$STAGING/" || echo "No server.js found"
-          [ -f package.json ] && cp package.json "$STAGING/" || true
-          [ -f package-lock.json ] && cp package-lock.json "$STAGING/" || true
+          cp package.json "$STAGING/"
+          cp package-lock.json "$STAGING/"
           [ -f README.md ] && cp README.md "$STAGING/" || true
           [ -f Dockerfile ] && cp Dockerfile "$STAGING/" || echo "No Dockerfile found"
 
@@ -118,8 +112,7 @@ jobs:
           path: ${{ env.ZIP_NAME }}
           retention-days: 90
 
-      # -------- Upload ZIP to Blob using account key; emit 1h SAS URL --------
-      - name: Upload package to Blob (key-based)
+      - name: Upload package to Blob (key-based, hardened)
         if: ${{ success() }}
         uses: azure/cli@v2.1.0
         env:
@@ -135,15 +128,18 @@ jobs:
             : "${AZ_STORAGE_KEY:?AZ_STORAGE_KEY missing}"
             : "${ZIP_NAME:?ZIP_NAME missing}"
 
+            # Trim stray whitespace/newlines in key
             AZ_STORAGE_KEY="$(printf %s "$AZ_STORAGE_KEY" | tr -d '\r\n')"
             export AZ_STORAGE_KEY
 
+            # Ensure container exists (idempotent)
             az storage container create \
               --name "$AZ_STORAGE_CONTAINER" \
               --account-name "$AZ_STORAGE_ACCOUNT" \
               --account-key "$AZ_STORAGE_KEY" \
               --only-show-errors 1>/dev/null
 
+            # Quick preflight
             az storage blob list \
               --account-name "$AZ_STORAGE_ACCOUNT" \
               --account-key "$AZ_STORAGE_KEY" \
@@ -160,6 +156,7 @@ jobs:
               --overwrite true \
               --only-show-errors
 
+            # Short-lived SAS URL for VM download
             SAS=$(az storage blob generate-sas \
               --account-name "$AZ_STORAGE_ACCOUNT" \
               --account-key "$AZ_STORAGE_KEY" \
@@ -168,107 +165,89 @@ jobs:
               --permissions r \
               --expiry "$(date -u -d '+1 hour' '+%Y-%m-%dT%H:%MZ')" \
               --https-only --full-uri -o tsv)
+
             echo "::add-mask::$SAS"
             echo "PACKAGE_SAS_URL=$SAS" >> "$GITHUB_ENV"
 
-      # -------- VM: install Node 22 + PM2 (sh-compatible), download & run --------
-      - name: Deploy on Azure VM (PM2 + Node 22, sh-compatible)
+      - name: Deploy on Azure VM (PM2 restart; Node/PM2 preinstalled)
         if: ${{ success() }}
         uses: azure/cli@v2.1.0
         env:
           AZURE_RESOURCE_GROUP: ${{ secrets.AZURE_RESOURCE_GROUP }}
           AZURE_VM_NAME: ${{ secrets.AZURE_VM_NAME }}
           PACKAGE_SAS_URL: ${{ env.PACKAGE_SAS_URL }}
-          APP_USER: azureuser      # change if different
+          APP_USER: azureuser           # change if different
           APP_DIR: /opt/myapp
           APP_NAME: myapp
-          APP_PORT: 3000           # change to your app port
         with:
           inlineScript: |
             set -euo pipefail
-            : "${PACKAGE_SAS_URL:?PACKAGE_SAS_URL missing}"
-
             az vm run-command invoke \
               --resource-group "$AZURE_RESOURCE_GROUP" \
               --name "$AZURE_VM_NAME" \
               --command-id RunShellScript \
               --scripts "
-                set -eu
-                PACKAGE_SAS_URL='${PACKAGE_SAS_URL}'
+                set -euo pipefail
+                PACKAGE_SAS_URL='$PACKAGE_SAS_URL'
                 APP_USER='${APP_USER:-azureuser}'
                 APP_DIR='${APP_DIR:-/opt/myapp}'
                 APP_NAME='${APP_NAME:-myapp}'
-                APP_PORT='${APP_PORT:-3000}'
+                RELEASES_DIR=\"\$APP_DIR/releases\"
                 CURRENT_DIR=\"\$APP_DIR/current\"
                 TMP=/tmp
                 ZIP_FILE=\$TMP/\$(basename \"\$PACKAGE_SAS_URL\" | cut -d'?' -f1)
 
-                # Base tools
-                sudo apt-get update -y
-                sudo apt-get install -y curl unzip ca-certificates gnupg jq
-
-                # Node 22.x
-                need_node=0
-                if ! command -v node >/dev/null 2>&1; then
-                  need_node=1
-                else
-                  major=\$(node -v 2>/dev/null | sed 's/^v\\([0-9][0-9]*\\).*/\\1/')
-                  if [ \"\$major\" -lt 22 ]; then need_node=1; fi
-                fi
-                if [ \"\$need_node\" -eq 1 ]; then
-                  curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
-                  sudo apt-get install -y nodejs
-                fi
-
-                # PM2
-                sudo npm i -g pm2@latest
-
-                # App dir
-                sudo mkdir -p \"\$CURRENT_DIR\"
+                echo '==> Prepare directories'
+                sudo mkdir -p \"\$RELEASES_DIR\" \"\$CURRENT_DIR\"
                 sudo chown -R \"\$APP_USER\":\"\$APP_USER\" \"\$APP_DIR\"
 
-                # Download & unzip
+                echo '==> Download deployment package'
                 curl -fSL \"\$PACKAGE_SAS_URL\" -o \"\$ZIP_FILE\"
-                sudo unzip -o \"\$ZIP_FILE\" -d \"\$CURRENT_DIR\"
-                if [ -d \"\$CURRENT_DIR/deployment-package\" ]; then
-                  set -f
-                  for f in \"\$CURRENT_DIR\"/deployment-package/* \"\$CURRENT_DIR\"/deployment-package/.*; do
-                    base=\$(basename \"\$f\")
-                    [ \"\$base\" = \".\" ] || [ \"\$base\" = \"..\" ] || sudo mv \"\$f\" \"\$CURRENT_DIR\"/
-                  done
-                  set +f
-                  sudo rm -rf \"\$CURRENT_DIR/deployment-package\"
-                fi
-                sudo chown -R \"\$APP_USER\":\"\$APP_USER\" \"\$CURRENT_DIR\"
 
-                # Install prod deps
-                if [ -f \"\$CURRENT_DIR/package.json\" ]; then
-                  sudo -H -u \"\$APP_USER\" sh -c \"cd '\$CURRENT_DIR' && (npm ci --omit=dev || npm i --omit=dev)\"
-                fi
+                TS=\$(date +%Y%m%d-%H%M%S)
+                DEST_DIR=\"\$RELEASES_DIR/\$TS\"
+                mkdir -p \"\$DEST_DIR\"
 
-                # PM2 start: prefer npm start, else server.js
-                started=0
-                if [ -f \"\$CURRENT_DIR/package.json\" ] && grep -q '\"start\"' \"\$CURRENT_DIR/package.json\"; then
-                  sudo -H -u \"\$APP_USER\" pm2 delete \"\$APP_NAME\" >/dev/null 2>&1 || true
-                  sudo -H -u \"\$APP_USER\" pm2 start npm --name \"\$APP_NAME\" -- start --prefix \"\$CURRENT_DIR\"
-                  started=1
-                fi
-                if [ \"\$started\" -eq 0 ] && [ -f \"\$CURRENT_DIR/server.js\" ]; then
-                  sudo -H -u \"\$APP_USER\" pm2 delete \"\$APP_NAME\" >/dev/null 2>&1 || true
-                  sudo -H -u \"\$APP_USER\" pm2 start \"\$CURRENT_DIR/server.js\" --name \"\$APP_NAME\"
-                  started=1
-                fi
-                if [ \"\$started\" -eq 0 ]; then
-                  echo 'No start script or server.js found.' >&2
-                  ls -la \"\$CURRENT_DIR\"
-                  exit 1
+                echo '==> Unzip package'
+                unzip -o \"\$ZIP_FILE\" -d \"\$DEST_DIR\"
+
+                # Flatten if the zip has a root 'deployment-package/' folder
+                if [ -d \"\$DEST_DIR/deployment-package\" ]; then
+                  shopt -s dotglob
+                  mv \"\$DEST_DIR\"/deployment-package/* \"\$DEST_DIR\"/
+                  rm -rf \"\$DEST_DIR\"/deployment-package
+                  shopt -u dotglob
                 fi
 
-                # PM2 autostart on boot
-                sudo env PATH=\$PATH:/usr/bin pm2 startup systemd -u \"\$APP_USER\" --hp \"/home/\$APP_USER\" >/dev/null
-                sudo -H -u \"\$APP_USER\" pm2 save
+                sudo chown -R \"\$APP_USER\":\"\$APP_USER\" \"\$DEST_DIR\"
 
-                # Quick diagnostics
-                sudo -H -u \"\$APP_USER\" pm2 ls || true
-                if command -v ss >/dev/null 2>&1; then sudo ss -ltnp | grep \":\$APP_PORT\" || true; fi
+                echo '==> Install production dependencies (if package.json exists)'
+                if [ -f \"\$DEST_DIR/package.json\" ]; then
+                  sudo -u \"\$APP_USER\" bash -lc \"cd '\$DEST_DIR' && (npm ci --omit=dev || npm i --omit=dev)\"
+                fi
+
+                echo '==> Point current -> new release'
+                ln -sfn \"\$DEST_DIR\" \"\$CURRENT_DIR\"
+
+                echo '==> Start/Restart with PM2'
+                if pm2 describe \"\$APP_NAME\" >/dev/null 2>&1; then
+                  sudo -u \"\$APP_USER\" pm2 restart \"\$APP_NAME\"
+                else
+                  if [ -f \"\$CURRENT_DIR/package.json\" ] && grep -q '\"start\"' \"\$CURRENT_DIR/package.json\"; then
+                    sudo -u \"\$APP_USER\" pm2 start npm --name \"\$APP_NAME\" -- start --prefix \"\$CURRENT_DIR\"
+                  elif [ -f \"\$CURRENT_DIR/server.js\" ]; then
+                    sudo -u \"\$APP_USER\" pm2 start \"\$CURRENT_DIR/server.js\" --name \"\$APP_NAME\"
+                  else
+                    echo 'No start script in package.json and no server.js found.' >&2
+                    exit 1
+                  fi
+                fi
+
+                echo '==> Save PM2 process list'
+                sudo -u \"\$APP_USER\" pm2 save
+
+                echo '==> PM2 list'
+                sudo -u \"\$APP_USER\" pm2 ls || true
+
+                echo '==> Done'
               "
