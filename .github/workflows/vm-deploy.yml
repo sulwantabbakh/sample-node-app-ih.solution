@@ -186,7 +186,7 @@ jobs:
               --name "$AZURE_VM_NAME" \
               --command-id RunShellScript \
               --scripts "
-                set -euo pipefail
+                set -eu
                 APP_DIR=\"${APP_DIR:-/opt/myapp}\"
                 APP_NAME=\"${APP_NAME:-myapp}\"
                 APP_USER=\"${APP_USER:-azureuser}\"
@@ -199,11 +199,16 @@ jobs:
                 unzip -o \"$ZIP_FILE\" -d \"$DEST_DIR\"
                 
                 # Flatten deployment-package folder if exists
-                [ -d \"$DEST_DIR/deployment-package\" ] && mv \"$DEST_DIR/deployment-package\"/* \"$DEST_DIR\"/ && rmdir \"$DEST_DIR/deployment-package\"
+                if [ -d \"$DEST_DIR/deployment-package\" ]; then
+                  mv \"$DEST_DIR/deployment-package\"/* \"$DEST_DIR\"/ 2>/dev/null || true
+                  rmdir \"$DEST_DIR/deployment-package\" 2>/dev/null || true
+                fi
                 
                 # Install deps and setup permissions
                 sudo chown -R \"$APP_USER:$APP_USER\" \"$APP_DIR\"
-                [ -f \"$DEST_DIR/package.json\" ] && sudo -u \"$APP_USER\" bash -lc \"cd '$DEST_DIR' && npm ci --omit=dev\"
+                if [ -f \"$DEST_DIR/package.json\" ]; then
+                  sudo -u \"$APP_USER\" bash -lc \"cd '$DEST_DIR' && npm ci --omit=dev\"
+                fi
                 
                 # Deploy with PM2
                 ln -sfn \"$DEST_DIR\" \"${APP_DIR}/current\"
