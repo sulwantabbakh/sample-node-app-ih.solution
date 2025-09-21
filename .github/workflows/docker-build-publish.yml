@@ -1,4 +1,4 @@
-name: Trigger auto deployment for frontendapp
+name: Build, Test, and Deploy to Azure Container Apps
 
 # When this action will be executed
 on:
