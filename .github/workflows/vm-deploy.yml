@@ -1,9 +1,11 @@
 name: Deploy Node App on Azure VM
 
 on:
-  workflow_dispatch
+  workflow_dispatch:
 
+# OIDC needs this:
 permissions:
+  id-token: write
   contents: read
   actions: read
   checks: write
@@ -23,7 +25,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4.4.0
         with:
-          node-version: 22.x        # Node 18 is EOL; use 22 LTS
+          node-version: 22.x          # Node 18 is EOL; use 22 LTS
           cache: npm
           cache-dependency-path: package-lock.json
 
@@ -88,6 +90,7 @@ jobs:
           [ -f README.md ] && cp README.md "$STAGING/" || true
           [ -f Dockerfile ] && cp Dockerfile "$STAGING/" || echo "No Dockerfile found"
 
+          # remove devDependencies meta so npm i --omit=dev is easier if needed (optional)
           (cd "$STAGING" && npm pkg delete devDependencies || true)
 
           TS="$(date +%Y%m%d-%H%M%S)"
@@ -103,46 +106,64 @@ jobs:
           path: ${{ env.ZIP_NAME }}
           retention-days: 90
 
-      # Upload the ZIP to Blob Storage (key auth is fine; no login needed)
-      - name: Upload package to Blob
+      # ----- Azure OIDC login (single login for both Storage + VM) -----
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      # ----- Upload to Blob with AAD; generate user-delegation SAS -----
+      - name: Upload package to Blob (AAD, user-delegation SAS)
         if: ${{ success() }}
         uses: azure/cli@v2.1.0
         env:
           ZIP_NAME: ${{ env.ZIP_NAME }}
           AZ_STORAGE_ACCOUNT: ${{ secrets.AZ_STORAGE_ACCOUNT }}
           AZ_STORAGE_CONTAINER: ${{ secrets.AZ_STORAGE_CONTAINER }}
-          AZ_STORAGE_KEY: ${{ secrets.AZ_STORAGE_KEY }}
         with:
           inlineScript: |
             set -euo pipefail
+
+            # Quick guards
+            : "${AZ_STORAGE_ACCOUNT:?AZ_STORAGE_ACCOUNT missing}"
+            : "${AZ_STORAGE_CONTAINER:?AZ_STORAGE_CONTAINER missing}"
+
+            # Ensure container exists (idempotent)
+            az storage container create \
+              --name "$AZ_STORAGE_CONTAINER" \
+              --account-name "$AZ_STORAGE_ACCOUNT" \
+              --auth-mode login \
+              --only-show-errors 1>/dev/null
+
+            # Upload artifact using AAD
             az storage blob upload \
               --account-name "$AZ_STORAGE_ACCOUNT" \
-              --account-key "$AZ_STORAGE_KEY" \
               --container-name "$AZ_STORAGE_CONTAINER" \
               --file "$ZIP_NAME" \
               --name "$ZIP_NAME" \
-              --overwrite true
+              --overwrite true \
+              --auth-mode login \
+              --only-show-errors
 
+            # Generate short-lived user-delegation SAS (requires roles:
+            # Storage Blob Data Contributor + Storage Blob Delegator on the storage account)
             SAS=$(az storage blob generate-sas \
               --account-name "$AZ_STORAGE_ACCOUNT" \
-              --account-key "$AZ_STORAGE_KEY" \
               --container-name "$AZ_STORAGE_CONTAINER" \
               --name "$ZIP_NAME" \
               --permissions r \
               --expiry "$(date -u -d '+1 hour' '+%Y-%m-%dT%H:%MZ')" \
               --https-only \
+              --as-user \
+              --auth-mode login \
               --full-uri -o tsv)
+
+            echo "::add-mask::$SAS"
             echo "PACKAGE_SAS_URL=$SAS" >> "$GITHUB_ENV"
 
-      # Login before running VM commands (required for az vm)
-      - name: Azure login (OIDC)
-        if: ${{ success() }}
-        uses: azure/login@v2
-        with:
-          client-id: ${{ secrets.ARM_CLIENT_ID }}
-          tenant-id: ${{ secrets.ARM_TENANT_ID }}
-          subscription-id: ${{ secrets.ARM_SUBSCRIPTION_ID }}
-
+      # ----- Remote deploy on VM: download from SAS + restart service -----
       - name: Deploy on Azure VM (download & restart)
         if: ${{ success() }}
         uses: azure/cli@v2.1.0
@@ -152,6 +173,7 @@ jobs:
           PACKAGE_SAS_URL: ${{ env.PACKAGE_SAS_URL }}
         with:
           inlineScript: |
+            set -euo pipefail
             az vm run-command invoke \
               --resource-group "$AZURE_RESOURCE_GROUP" \
               --name "$AZURE_VM_NAME" \
