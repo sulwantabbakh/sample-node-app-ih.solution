@@ -8,7 +8,7 @@ permissions:
   actions: read
   checks: write
   pull-requests: write
-  id-token: write   # harmless here; not using OIDC in this workflow
+  id-token: write 
 
 jobs:
   build-and-test:
@@ -169,92 +169,49 @@ jobs:
             echo "::add-mask::$SAS"
             echo "PACKAGE_SAS_URL=$SAS" >> "$GITHUB_ENV"
 
-      - name: Deploy on Azure VM (PM2 restart; Node/PM2 preinstalled) — bash shell
+      - name: Deploy on Azure VM
         if: ${{ success() }}
         uses: azure/cli@v2.1.0
         env:
           AZURE_RESOURCE_GROUP: ${{ secrets.AZURE_RESOURCE_GROUP }}
           AZURE_VM_NAME: ${{ secrets.AZURE_VM_NAME }}
           PACKAGE_SAS_URL: ${{ env.PACKAGE_SAS_URL }}
-          APP_USER: azureuser           # change if different
+          APP_USER: azureuser
           APP_DIR: /opt/myapp
           APP_NAME: myapp
         with:
           inlineScript: |
-            set -euo pipefail
             az vm run-command invoke \
               --resource-group "$AZURE_RESOURCE_GROUP" \
               --name "$AZURE_VM_NAME" \
               --command-id RunShellScript \
               --scripts "
-                bash -lc '
-                  set -Eeuo pipefail
-                  PACKAGE_SAS_URL=\"${PACKAGE_SAS_URL}\"
-                  APP_USER=\"${APP_USER:-azureuser}\"
-                  APP_DIR=\"${APP_DIR:-/opt/myapp}\"
-                  APP_NAME=\"${APP_NAME:-myapp}\"
-                  RELEASES_DIR=\"${APP_DIR}/releases\"
-                  CURRENT_DIR=\"${APP_DIR}/current\"
-                  TMP=/tmp
-                  ZIP_FILE=\"${TMP}/$(basename \"${PACKAGE_SAS_URL}\" | cut -d\"?\" -f1)\"
-
-                  # Prechecks (assumes curl, unzip, pm2 already installed)
-                  command -v pm2 >/dev/null || { echo \"PM2 is not installed on the VM.\" >&2; exit 1; }
-                  command -v curl >/dev/null || { echo \"curl is required on the VM.\" >&2; exit 1; }
-                  command -v unzip >/dev/null || { echo \"unzip is required on the VM.\" >&2; exit 1; }
-
-                  echo \"==> Prepare directories\"
-                  sudo mkdir -p \"${RELEASES_DIR}\" \"${CURRENT_DIR}\"
-                  sudo chown -R \"${APP_USER}:${APP_USER}\" \"${APP_DIR}\"
-
-                  echo \"==> Download deployment package\"
-                  curl -fSL \"${PACKAGE_SAS_URL}\" -o \"${ZIP_FILE}\"
-
-                  TS=$(date +%Y%m%d-%H%M%S)
-                  DEST_DIR=\"${RELEASES_DIR}/${TS}\"
-                  mkdir -p \"${DEST_DIR}\"
-
-                  echo \"==> Unzip package\"
-                  unzip -o \"${ZIP_FILE}\" -d \"${DEST_DIR}\"
-
-                  # Flatten if the zip has a root folder deployment-package/
-                  if [ -d \"${DEST_DIR}/deployment-package\" ]; then
-                    shopt -s dotglob
-                    mv \"${DEST_DIR}\"/deployment-package/* \"${DEST_DIR}\"/
-                    rm -rf \"${DEST_DIR}/deployment-package\"
-                    shopt -u dotglob
-                  fi
-
-                  sudo chown -R \"${APP_USER}:${APP_USER}\" \"${DEST_DIR}\"
-
-                  echo \"==> Install production dependencies (if package.json exists)\"
-                  if [ -f \"${DEST_DIR}/package.json\" ]; then
-                    sudo -u \"${APP_USER}\" bash -lc \"cd '${DEST_DIR}' && (npm ci --omit=dev || npm i --omit=dev)\"
-                  fi
-
-                  echo \"==> Point current -> new release\"
-                  ln -sfn \"${DEST_DIR}\" \"${CURRENT_DIR}\"
-
-                  echo \"==> Start/Restart with PM2\"
-                  if pm2 describe \"${APP_NAME}\" >/dev/null 2>&1; then
-                    sudo -u \"${APP_USER}\" pm2 restart \"${APP_NAME}\"
-                  else
-                    if [ -f \"${CURRENT_DIR}/package.json\" ] && grep -q '\"start\"' \"${CURRENT_DIR}/package.json\"; then
-                      sudo -u \"${APP_USER}\" pm2 start npm --name \"${APP_NAME}\" -- start --prefix \"${CURRENT_DIR}\"
-                    elif [ -f \"${CURRENT_DIR}/server.js\" ]; then
-                      sudo -u \"${APP_USER}\" pm2 start \"${CURRENT_DIR}/server.js\" --name \"${APP_NAME}\"
-                    else
-                      echo \"No start script in package.json and no server.js found.\" >&2
-                      exit 1
-                    fi
-                  fi
-
-                  echo \"==> Save PM2 process list\"
-                  sudo -u \"${APP_USER}\" pm2 save
-
-                  echo \"==> PM2 list\"
-                  sudo -u \"${APP_USER}\" pm2 ls || true
-
-                  echo \"==> Done\"
-                '
+                set -euo pipefail
+                APP_DIR=\"${APP_DIR:-/opt/myapp}\"
+                APP_NAME=\"${APP_NAME:-myapp}\"
+                APP_USER=\"${APP_USER:-azureuser}\"
+                ZIP_FILE=\"/tmp/$(basename \"${PACKAGE_SAS_URL}\" | cut -d'?' -f1)\"
+                DEST_DIR=\"${APP_DIR}/releases/$(date +%Y%m%d-%H%M%S)\"
+                
+                # Download and extract
+                curl -fSL \"${PACKAGE_SAS_URL}\" -o \"$ZIP_FILE\"
+                sudo mkdir -p \"$DEST_DIR\" \"${APP_DIR}/current\"
+                unzip -o \"$ZIP_FILE\" -d \"$DEST_DIR\"
+                
+                # Flatten deployment-package folder if exists
+                [ -d \"$DEST_DIR/deployment-package\" ] && mv \"$DEST_DIR/deployment-package\"/* \"$DEST_DIR\"/ && rmdir \"$DEST_DIR/deployment-package\"
+                
+                # Install deps and setup permissions
+                sudo chown -R \"$APP_USER:$APP_USER\" \"$APP_DIR\"
+                [ -f \"$DEST_DIR/package.json\" ] && sudo -u \"$APP_USER\" bash -lc \"cd '$DEST_DIR' && npm ci --omit=dev\"
+                
+                # Deploy with PM2
+                ln -sfn \"$DEST_DIR\" \"${APP_DIR}/current\"
+                if pm2 describe \"$APP_NAME\" >/dev/null 2>&1; then
+                  sudo -u \"$APP_USER\" pm2 restart \"$APP_NAME\"
+                else
+                  sudo -u \"$APP_USER\" pm2 start \"${APP_DIR}/current/server.js\" --name \"$APP_NAME\"
+                fi
+                sudo -u \"$APP_USER\" pm2 save
+                echo \"Deployment completed successfully\"
               "
