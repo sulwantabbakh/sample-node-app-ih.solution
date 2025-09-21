@@ -8,7 +8,7 @@ permissions:
   actions: read
   checks: write
   pull-requests: write
-  id-token: write   # harmless even though we're not using OIDC here
+  id-token: write   # harmless here; not using OIDC in this workflow
 
 jobs:
   build-and-test:
@@ -112,7 +112,7 @@ jobs:
           path: ${{ env.ZIP_NAME }}
           retention-days: 90
 
-      - name: Upload package to Blob (key-based)
+      - name: Upload package to Blob (key-based, hardened)
         if: ${{ success() }}
         uses: azure/cli@v2.1.0
         env:
@@ -124,28 +124,51 @@ jobs:
           inlineScript: |
             set -euo pipefail
 
-            # Guards
+            # --- Guards ---
             : "${AZ_STORAGE_ACCOUNT:?AZ_STORAGE_ACCOUNT missing}"
             : "${AZ_STORAGE_CONTAINER:?AZ_STORAGE_CONTAINER missing}"
             : "${AZ_STORAGE_KEY:?AZ_STORAGE_KEY missing}"
             : "${ZIP_NAME:?ZIP_NAME missing}"
 
+            # Trim stray whitespace/newlines in key
+            CLEAN_KEY="$(printf %s "$AZ_STORAGE_KEY" | tr -d '\r\n')"
+            export AZ_STORAGE_KEY="$CLEAN_KEY"
+
+            # Heuristic sanity check
+            KEYLEN=${#AZ_STORAGE_KEY}
+            if [ "$KEYLEN" -lt 60 ]; then
+              echo "Storage key looks too short ($KEYLEN chars). Re-copy from Portal -> Access keys." >&2
+              exit 1
+            fi
+
             # Ensure container exists (idempotent)
             az storage container create \
               --name "$AZ_STORAGE_CONTAINER" \
               --account-name "$AZ_STORAGE_ACCOUNT" \
-              --account-key "$AZ_STORAGE_KEY" 1>/dev/null
+              --account-key "$AZ_STORAGE_KEY" \
+              --only-show-errors 1>/dev/null
 
-            # Upload zip
+            # Preflight validate key by listing (noisy failures avoided)
+            if ! az storage blob list \
+                  --account-name "$AZ_STORAGE_ACCOUNT" \
+                  --account-key "$AZ_STORAGE_KEY" \
+                  --container-name "$AZ_STORAGE_CONTAINER" \
+                  --num-results 1 --only-show-errors 1>/dev/null; then
+              echo "❌ Storage auth failed. Check account name, container, and AZ_STORAGE_KEY." >&2
+              exit 1
+            fi
+
+            echo "✅ Storage key validated. Uploading $ZIP_NAME ..."
             az storage blob upload \
               --account-name "$AZ_STORAGE_ACCOUNT" \
               --account-key "$AZ_STORAGE_KEY" \
               --container-name "$AZ_STORAGE_CONTAINER" \
               --file "$ZIP_NAME" \
               --name "$ZIP_NAME" \
-              --overwrite true
+              --overwrite true \
+              --only-show-errors
 
-            # Optional: short-lived SAS URL for VM download
+            # Short-lived SAS URL for VM download
             SAS=$(az storage blob generate-sas \
               --account-name "$AZ_STORAGE_ACCOUNT" \
               --account-key "$AZ_STORAGE_KEY" \
@@ -157,3 +180,40 @@ jobs:
 
             echo "::add-mask::$SAS"
             echo "PACKAGE_SAS_URL=$SAS" >> "$GITHUB_ENV"
+
+      - name: Deploy on Azure VM (download & restart)
+        if: ${{ success() }}
+        uses: azure/cli@v2.1.0
+        env:
+          AZURE_RESOURCE_GROUP: ${{ secrets.AZURE_RESOURCE_GROUP }}
+          AZURE_VM_NAME: ${{ secrets.AZURE_VM_NAME }}
+          PACKAGE_SAS_URL: ${{ env.PACKAGE_SAS_URL }}
+        with:
+          inlineScript: |
+            set -euo pipefail
+            az vm run-command invoke \
+              --resource-group "$AZURE_RESOURCE_GROUP" \
+              --name "$AZURE_VM_NAME" \
+              --command-id RunShellScript \
+              --scripts "
+                set -euo pipefail
+                DEPLOY_DIR=/opt/myapp
+                TMP=/tmp
+                FILE=\$TMP/$(basename \"$PACKAGE_SAS_URL\" | cut -d'?' -f1)
+
+                if ! command -v curl >/dev/null 2>&1; then sudo apt-get update -y && sudo apt-get install -y curl; fi
+                if ! command -v unzip >/dev/null 2>&1; then sudo apt-get update -y && sudo apt-get install -y unzip; fi
+
+                echo 'Downloading package...'
+                curl -fSL \"$PACKAGE_SAS_URL\" -o \"\$FILE\"
+
+                sudo mkdir -p \$DEPLOY_DIR
+                sudo unzip -o \"\$FILE\" -d \$DEPLOY_DIR
+
+                if sudo systemctl --quiet is-enabled myapp.service 2>/dev/null; then
+                  sudo systemctl restart myapp.service
+                  echo 'Restarted myapp.service'
+                else
+                  echo 'myapp.service not found — start your app as appropriate.'
+                fi
+              "
