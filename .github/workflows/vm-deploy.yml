@@ -1,15 +1,14 @@
-name: Deploy Node App on Azure VM
+name: Deploy Node App on Azure VM (Client Secret + Storage Key)
 
 on:
   workflow_dispatch:
 
-# OIDC needs this:
 permissions:
-  id-token: write
   contents: read
   actions: read
   checks: write
   pull-requests: write
+  id-token: write   # harmless even though we're not using OIDC here
 
 jobs:
   build-and-test:
@@ -20,12 +19,12 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v5
         with:
-          fetch-depth: 0  # helps SonarQube PR/branch reporting
+          fetch-depth: 0
 
       - name: Setup Node.js
         uses: actions/setup-node@v4.4.0
         with:
-          node-version: 22.x          # Node 18 is EOL; use 22 LTS
+          node-version: 22.x
           cache: npm
           cache-dependency-path: package-lock.json
 
@@ -90,7 +89,6 @@ jobs:
           [ -f README.md ] && cp README.md "$STAGING/" || true
           [ -f Dockerfile ] && cp Dockerfile "$STAGING/" || echo "No Dockerfile found"
 
-          # remove devDependencies meta so npm i --omit=dev is easier if needed (optional)
           (cd "$STAGING" && npm pkg delete devDependencies || true)
 
           TS="$(date +%Y%m%d-%H%M%S)"
@@ -99,6 +97,14 @@ jobs:
           (cd "$GITHUB_WORKSPACE" && zip -r "$ZIP_NAME" "deployment-package")
           echo "ZIP_NAME=$ZIP_NAME" >> "$GITHUB_ENV"
 
+      - name: Azure login (client secret)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+
       - name: Upload deployment package artifact
         uses: actions/upload-artifact@v4.6.2
         with:
@@ -106,97 +112,48 @@ jobs:
           path: ${{ env.ZIP_NAME }}
           retention-days: 90
 
-      # ----- Azure OIDC login (single login for both Storage + VM) -----
-      - name: Azure login (OIDC)
-        uses: azure/login@v2
-        with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-
-      # ----- Upload to Blob with AAD; generate user-delegation SAS -----
-      - name: Upload package to Blob (AAD, user-delegation SAS)
+      - name: Upload package to Blob (key-based)
         if: ${{ success() }}
         uses: azure/cli@v2.1.0
         env:
           ZIP_NAME: ${{ env.ZIP_NAME }}
           AZ_STORAGE_ACCOUNT: ${{ secrets.AZ_STORAGE_ACCOUNT }}
           AZ_STORAGE_CONTAINER: ${{ secrets.AZ_STORAGE_CONTAINER }}
+          AZ_STORAGE_KEY: ${{ secrets.AZ_STORAGE_KEY }}
         with:
           inlineScript: |
             set -euo pipefail
 
-            # Quick guards
+            # Guards
             : "${AZ_STORAGE_ACCOUNT:?AZ_STORAGE_ACCOUNT missing}"
             : "${AZ_STORAGE_CONTAINER:?AZ_STORAGE_CONTAINER missing}"
+            : "${AZ_STORAGE_KEY:?AZ_STORAGE_KEY missing}"
+            : "${ZIP_NAME:?ZIP_NAME missing}"
 
             # Ensure container exists (idempotent)
             az storage container create \
               --name "$AZ_STORAGE_CONTAINER" \
               --account-name "$AZ_STORAGE_ACCOUNT" \
-              --auth-mode login \
-              --only-show-errors 1>/dev/null
+              --account-key "$AZ_STORAGE_KEY" 1>/dev/null
 
-            # Upload artifact using AAD
+            # Upload zip
             az storage blob upload \
               --account-name "$AZ_STORAGE_ACCOUNT" \
+              --account-key "$AZ_STORAGE_KEY" \
               --container-name "$AZ_STORAGE_CONTAINER" \
               --file "$ZIP_NAME" \
               --name "$ZIP_NAME" \
-              --overwrite true \
-              --auth-mode login \
-              --only-show-errors
+              --overwrite true
 
-            # Generate short-lived user-delegation SAS (requires roles:
-            # Storage Blob Data Contributor + Storage Blob Delegator on the storage account)
+            # Optional: short-lived SAS URL for VM download
             SAS=$(az storage blob generate-sas \
               --account-name "$AZ_STORAGE_ACCOUNT" \
+              --account-key "$AZ_STORAGE_KEY" \
               --container-name "$AZ_STORAGE_CONTAINER" \
               --name "$ZIP_NAME" \
               --permissions r \
               --expiry "$(date -u -d '+1 hour' '+%Y-%m-%dT%H:%MZ')" \
-              --https-only \
-              --as-user \
-              --auth-mode login \
-              --full-uri -o tsv)
+              --https-only --full-uri -o tsv)
 
             echo "::add-mask::$SAS"
             echo "PACKAGE_SAS_URL=$SAS" >> "$GITHUB_ENV"
-
-      # ----- Remote deploy on VM: download from SAS + restart service -----
-      - name: Deploy on Azure VM (download & restart)
-        if: ${{ success() }}
-        uses: azure/cli@v2.1.0
-        env:
-          AZURE_RESOURCE_GROUP: ${{ secrets.AZURE_RESOURCE_GROUP }}
-          AZURE_VM_NAME: ${{ secrets.AZURE_VM_NAME }}
-          PACKAGE_SAS_URL: ${{ env.PACKAGE_SAS_URL }}
-        with:
-          inlineScript: |
-            set -euo pipefail
-            az vm run-command invoke \
-              --resource-group "$AZURE_RESOURCE_GROUP" \
-              --name "$AZURE_VM_NAME" \
-              --command-id RunShellScript \
-              --scripts "
-                set -euo pipefail
-                DEPLOY_DIR=/opt/myapp
-                TMP=/tmp
-                FILE=\$TMP/$(basename \"$PACKAGE_SAS_URL\" | cut -d'?' -f1)
-
-                if ! command -v curl >/dev/null 2>&1; then sudo apt-get update -y && sudo apt-get install -y curl; fi
-                if ! command -v unzip >/dev/null 2>&1; then sudo apt-get update -y && sudo apt-get install -y unzip; fi
-
-                echo 'Downloading package from Blob...'
-                curl -fSL \"$PACKAGE_SAS_URL\" -o \"\$FILE\"
-
-                sudo mkdir -p \$DEPLOY_DIR
-                sudo unzip -o \"\$FILE\" -d \$DEPLOY_DIR
-
-                if sudo systemctl --quiet is-enabled myapp.service 2>/dev/null; then
-                  sudo systemctl restart myapp.service
-                  echo 'Restarted myapp.service'
-                else
-                  echo 'myapp.service not found — start your app as appropriate.'
-                fi
-              "
