@@ -1,4 +1,4 @@
-name: Deploy Node App on Azure VM 
+name: Deploy Node App on Azure VM
 
 on:
   workflow_dispatch:
@@ -169,7 +169,7 @@ jobs:
             echo "::add-mask::$SAS"
             echo "PACKAGE_SAS_URL=$SAS" >> "$GITHUB_ENV"
 
-      - name: Deploy on Azure VM (PM2 restart; Node/PM2 preinstalled)
+      - name: Deploy on Azure VM (PM2 restart; Node/PM2 preinstalled) — bash shell
         if: ${{ success() }}
         uses: azure/cli@v2.1.0
         env:
@@ -187,67 +187,74 @@ jobs:
               --name "$AZURE_VM_NAME" \
               --command-id RunShellScript \
               --scripts "
-                set -euo pipefail
-                PACKAGE_SAS_URL='$PACKAGE_SAS_URL'
-                APP_USER='${APP_USER:-azureuser}'
-                APP_DIR='${APP_DIR:-/opt/myapp}'
-                APP_NAME='${APP_NAME:-myapp}'
-                RELEASES_DIR=\"\$APP_DIR/releases\"
-                CURRENT_DIR=\"\$APP_DIR/current\"
-                TMP=/tmp
-                ZIP_FILE=\$TMP/\$(basename \"\$PACKAGE_SAS_URL\" | cut -d'?' -f1)
+                bash -lc '
+                  set -Eeuo pipefail
+                  PACKAGE_SAS_URL=\"${PACKAGE_SAS_URL}\"
+                  APP_USER=\"${APP_USER:-azureuser}\"
+                  APP_DIR=\"${APP_DIR:-/opt/myapp}\"
+                  APP_NAME=\"${APP_NAME:-myapp}\"
+                  RELEASES_DIR=\"${APP_DIR}/releases\"
+                  CURRENT_DIR=\"${APP_DIR}/current\"
+                  TMP=/tmp
+                  ZIP_FILE=\"${TMP}/$(basename \"${PACKAGE_SAS_URL}\" | cut -d\"?\" -f1)\"
 
-                echo '==> Prepare directories'
-                sudo mkdir -p \"\$RELEASES_DIR\" \"\$CURRENT_DIR\"
-                sudo chown -R \"\$APP_USER\":\"\$APP_USER\" \"\$APP_DIR\"
+                  # Prechecks (assumes curl, unzip, pm2 already installed)
+                  command -v pm2 >/dev/null || { echo \"PM2 is not installed on the VM.\" >&2; exit 1; }
+                  command -v curl >/dev/null || { echo \"curl is required on the VM.\" >&2; exit 1; }
+                  command -v unzip >/dev/null || { echo \"unzip is required on the VM.\" >&2; exit 1; }
 
-                echo '==> Download deployment package'
-                curl -fSL \"\$PACKAGE_SAS_URL\" -o \"\$ZIP_FILE\"
+                  echo \"==> Prepare directories\"
+                  sudo mkdir -p \"${RELEASES_DIR}\" \"${CURRENT_DIR}\"
+                  sudo chown -R \"${APP_USER}:${APP_USER}\" \"${APP_DIR}\"
 
-                TS=\$(date +%Y%m%d-%H%M%S)
-                DEST_DIR=\"\$RELEASES_DIR/\$TS\"
-                mkdir -p \"\$DEST_DIR\"
+                  echo \"==> Download deployment package\"
+                  curl -fSL \"${PACKAGE_SAS_URL}\" -o \"${ZIP_FILE}\"
 
-                echo '==> Unzip package'
-                unzip -o \"\$ZIP_FILE\" -d \"\$DEST_DIR\"
+                  TS=$(date +%Y%m%d-%H%M%S)
+                  DEST_DIR=\"${RELEASES_DIR}/${TS}\"
+                  mkdir -p \"${DEST_DIR}\"
 
-                # Flatten if the zip has a root 'deployment-package/' folder
-                if [ -d \"\$DEST_DIR/deployment-package\" ]; then
-                  shopt -s dotglob
-                  mv \"\$DEST_DIR\"/deployment-package/* \"\$DEST_DIR\"/
-                  rm -rf \"\$DEST_DIR\"/deployment-package
-                  shopt -u dotglob
-                fi
+                  echo \"==> Unzip package\"
+                  unzip -o \"${ZIP_FILE}\" -d \"${DEST_DIR}\"
 
-                sudo chown -R \"\$APP_USER\":\"\$APP_USER\" \"\$DEST_DIR\"
-
-                echo '==> Install production dependencies (if package.json exists)'
-                if [ -f \"\$DEST_DIR/package.json\" ]; then
-                  sudo -u \"\$APP_USER\" bash -lc \"cd '\$DEST_DIR' && (npm ci --omit=dev || npm i --omit=dev)\"
-                fi
-
-                echo '==> Point current -> new release'
-                ln -sfn \"\$DEST_DIR\" \"\$CURRENT_DIR\"
-
-                echo '==> Start/Restart with PM2'
-                if pm2 describe \"\$APP_NAME\" >/dev/null 2>&1; then
-                  sudo -u \"\$APP_USER\" pm2 restart \"\$APP_NAME\"
-                else
-                  if [ -f \"\$CURRENT_DIR/package.json\" ] && grep -q '\"start\"' \"\$CURRENT_DIR/package.json\"; then
-                    sudo -u \"\$APP_USER\" pm2 start npm --name \"\$APP_NAME\" -- start --prefix \"\$CURRENT_DIR\"
-                  elif [ -f \"\$CURRENT_DIR/server.js\" ]; then
-                    sudo -u \"\$APP_USER\" pm2 start \"\$CURRENT_DIR/server.js\" --name \"\$APP_NAME\"
-                  else
-                    echo 'No start script in package.json and no server.js found.' >&2
-                    exit 1
+                  # Flatten if the zip has a root folder deployment-package/
+                  if [ -d \"${DEST_DIR}/deployment-package\" ]; then
+                    shopt -s dotglob
+                    mv \"${DEST_DIR}\"/deployment-package/* \"${DEST_DIR}\"/
+                    rm -rf \"${DEST_DIR}/deployment-package\"
+                    shopt -u dotglob
                   fi
-                fi
 
-                echo '==> Save PM2 process list'
-                sudo -u \"\$APP_USER\" pm2 save
+                  sudo chown -R \"${APP_USER}:${APP_USER}\" \"${DEST_DIR}\"
 
-                echo '==> PM2 list'
-                sudo -u \"\$APP_USER\" pm2 ls || true
+                  echo \"==> Install production dependencies (if package.json exists)\"
+                  if [ -f \"${DEST_DIR}/package.json\" ]; then
+                    sudo -u \"${APP_USER}\" bash -lc \"cd '${DEST_DIR}' && (npm ci --omit=dev || npm i --omit=dev)\"
+                  fi
 
-                echo '==> Done'
+                  echo \"==> Point current -> new release\"
+                  ln -sfn \"${DEST_DIR}\" \"${CURRENT_DIR}\"
+
+                  echo \"==> Start/Restart with PM2\"
+                  if pm2 describe \"${APP_NAME}\" >/dev/null 2>&1; then
+                    sudo -u \"${APP_USER}\" pm2 restart \"${APP_NAME}\"
+                  else
+                    if [ -f \"${CURRENT_DIR}/package.json\" ] && grep -q '\"start\"' \"${CURRENT_DIR}/package.json\"; then
+                      sudo -u \"${APP_USER}\" pm2 start npm --name \"${APP_NAME}\" -- start --prefix \"${CURRENT_DIR}\"
+                    elif [ -f \"${CURRENT_DIR}/server.js\" ]; then
+                      sudo -u \"${APP_USER}\" pm2 start \"${CURRENT_DIR}/server.js\" --name \"${APP_NAME}\"
+                    else
+                      echo \"No start script in package.json and no server.js found.\" >&2
+                      exit 1
+                    fi
+                  fi
+
+                  echo \"==> Save PM2 process list\"
+                  sudo -u \"${APP_USER}\" pm2 save
+
+                  echo \"==> PM2 list\"
+                  sudo -u \"${APP_USER}\" pm2 ls || true
+
+                  echo \"==> Done\"
+                '
               "
