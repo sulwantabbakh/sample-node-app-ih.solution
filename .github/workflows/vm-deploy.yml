@@ -190,9 +190,8 @@ jobs:
                 APP_DIR=\"${APP_DIR:-/opt/myapp}\"
                 APP_NAME=\"${APP_NAME:-myapp}\"
                 APP_USER=\"${APP_USER:-azureuser}\"
-                TIMESTAMP=$(date +%Y%m%d-%H%M%S)
-                ZIP_FILE=\"/tmp/deployment-package-${TIMESTAMP}.zip\"
-                DEST_DIR=\"${APP_DIR}/releases/${TIMESTAMP}\"
+                ZIP_FILE=\"/tmp/deployment-package.zip\"
+                DEST_DIR=\"${APP_DIR}/releases/$(date +%Y%m%d-%H%M%S)\"
                 
                 # Download and extract
                 echo \"Downloading deployment package...\"
