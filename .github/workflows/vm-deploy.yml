@@ -243,21 +243,32 @@ jobs:
           echo "Contents of releases directory:"
           ls -la "$APP_DIR/releases/"
           
-          # Restart/Start with PM2
-          echo "Starting application with PM2..."
-          if pm2 describe "$APP_NAME" >/dev/null 2>&1; then
-            echo "Restarting existing PM2 process..."
-            sudo -u "$APP_USER" pm2 restart "$APP_NAME"
-          else
-            echo "Starting new PM2 process..."
-            sudo -u "$APP_USER" pm2 start "$APP_DIR/current/server.js" --name "$APP_NAME"
-          fi
+          # Stop any existing PM2 process
+          echo "Stopping any existing PM2 processes..."
+          sudo -u "$APP_USER" pm2 stop "$APP_NAME" 2>/dev/null || true
+          sudo -u "$APP_USER" pm2 delete "$APP_NAME" 2>/dev/null || true
           
-          echo "Saving PM2 configuration..."
-          sudo -u "$APP_USER" pm2 save
+          # Start with PM2
+          echo "Starting application with PM2..."
+          sudo -u "$APP_USER" pm2 start "$APP_DIR/current/server.js" --name "$APP_NAME" --log-date-format="YYYY-MM-DD HH:mm:ss Z"
+          
+          echo "Waiting for application to start..."
+          sleep 5
           
           echo "PM2 status:"
           sudo -u "$APP_USER" pm2 ls
+          
+          echo "PM2 logs (last 20 lines):"
+          sudo -u "$APP_USER" pm2 logs "$APP_NAME" --lines 20
+          
+          echo "Checking if application is listening on port 3000:"
+          sudo netstat -tlnp | grep :3000 || echo "Port 3000 not listening"
+          
+          echo "Testing application locally:"
+          curl -f http://localhost:3000/health || echo "Health check failed"
+          
+          echo "Saving PM2 configuration..."
+          sudo -u "$APP_USER" pm2 save
           
           echo "Cleaning up..."
           rm -f /tmp/app.zip

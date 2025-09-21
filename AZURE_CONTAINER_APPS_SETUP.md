@@ -8,8 +8,10 @@ The workflow `azure-container-apps-deploy.yml` deploys the Node.js application t
 
 - **Build and Test**: Runs tests and SonarQube analysis
 - **Docker Build**: Builds and pushes Docker images to Docker Hub
-- **Deploy**: Deploys the containerized app to Azure Container Apps
+- **Deploy**: Updates existing Container Apps with new image
 - **Health Check**: Verifies the deployment is successful
+
+**Note**: This workflow assumes that the Container Apps Environment and Container App have already been created. It will only update existing resources, not create new ones.
 
 ## Required GitHub Secrets
 
@@ -80,6 +82,31 @@ For code quality analysis:
      --resource-group my-resource-group \
      --workspace-name my-log-analytics-workspace \
      --location eastus
+   ```
+
+4. **Create Container Apps Environment**:
+   ```bash
+   az containerapp env create \
+     --name sample-node-app-ih-dev-env \
+     --resource-group my-resource-group \
+     --location eastus \
+     --logs-workspace-id {log-analytics-workspace-id} \
+     --logs-workspace-key {log-analytics-workspace-key}
+   ```
+
+5. **Create Container App** (for each environment):
+   ```bash
+   az containerapp create \
+     --name sample-node-app-ih-dev \
+     --resource-group my-resource-group \
+     --environment sample-node-app-ih-dev-env \
+     --image docker.io/yourusername/sample-node-app-ih:latest \
+     --target-port 3000 \
+     --ingress external \
+     --min-replicas 1 \
+     --max-replicas 3 \
+     --cpu 0.5 \
+     --memory 1.0Gi
    ```
 
 ### 3. GitHub Environment Setup
@@ -153,10 +180,10 @@ The workflow can be triggered by:
    - Verify all Azure secrets are correctly set
    - Check Service Principal permissions
 
-3. **Container App Creation Failed**:
-   - Ensure the resource group exists
-   - Check Azure subscription limits
-   - Verify the location is supported
+3. **Container App Not Found**:
+   - Ensure the Container App has been created beforehand
+   - Verify the Container App name matches the expected naming convention
+   - Check that the Container App exists in the correct resource group
 
 4. **Health Check Failed**:
    - Check if the application is listening on port 3000

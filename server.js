@@ -46,9 +46,10 @@ app.use((err, req, res, next) => {
 
 // Only start the server if this file is run directly
 if (require.main === module) {
-  app.listen(PORT, () => {
-    console.log(`🚀 DevOps Bootcamp Showcase server running on http://localhost:${PORT}`);
-    console.log(`📊 Health check available at http://localhost:${PORT}/health`);
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(`🚀 DevOps Bootcamp Showcase server running on http://0.0.0.0:${PORT}`);
+    console.log(`📊 Health check available at http://0.0.0.0:${PORT}/health`);
+    console.log(`🌐 Server accessible from external connections on port ${PORT}`);
   });
 }
 
