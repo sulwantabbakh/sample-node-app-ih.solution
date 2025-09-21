@@ -195,6 +195,12 @@ jobs:
             sudo npm install -g pm2
           fi
           
+          # Install unzip if not present
+          if ! command -v unzip >/dev/null 2>&1; then
+            echo "Installing unzip..."
+            sudo apt-get update && sudo apt-get install -y unzip
+          fi
+          
           # Create directories
           sudo mkdir -p "$APP_DIR/releases" "$APP_DIR/current"
           
@@ -210,8 +216,8 @@ jobs:
           # Find the actual app directory (handle deployment-package folder)
           if [ -d "$RELEASE_DIR/deployment-package" ]; then
             echo "Flattening package structure..."
-            sudo mv "$RELEASE_DIR/deployment-package"/* "$RELEASE_DIR/"
-            sudo rmdir "$RELEASE_DIR/deployment-package"
+            sudo mv "$RELEASE_DIR/deployment-package"/* "$RELEASE_DIR/" 2>/dev/null || true
+            sudo rmdir "$RELEASE_DIR/deployment-package" 2>/dev/null || true
           fi
           
           # Set permissions
@@ -225,7 +231,7 @@ jobs:
           
           # Deploy - create symlink
           echo "Creating symlink..."
-          sudo rm -f "$APP_DIR/current"
+          sudo rm -rf "$APP_DIR/current"
           sudo ln -sfn "$RELEASE_DIR" "$APP_DIR/current"
           
           # Verify files are in place
@@ -238,13 +244,22 @@ jobs:
           ls -la "$APP_DIR/releases/"
           
           # Restart/Start with PM2
+          echo "Starting application with PM2..."
           if pm2 describe "$APP_NAME" >/dev/null 2>&1; then
+            echo "Restarting existing PM2 process..."
             sudo -u "$APP_USER" pm2 restart "$APP_NAME"
           else
+            echo "Starting new PM2 process..."
             sudo -u "$APP_USER" pm2 start "$APP_DIR/current/server.js" --name "$APP_NAME"
           fi
           
+          echo "Saving PM2 configuration..."
           sudo -u "$APP_USER" pm2 save
+          
+          echo "PM2 status:"
+          sudo -u "$APP_USER" pm2 ls
+          
+          echo "Cleaning up..."
           rm -f /tmp/app.zip
           echo "Deployment completed successfully"
           EOF
