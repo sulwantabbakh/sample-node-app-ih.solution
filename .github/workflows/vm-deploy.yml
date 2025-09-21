@@ -207,8 +207,9 @@ jobs:
           sudo mkdir -p "$RELEASE_DIR"
           unzip -o /tmp/app.zip -d "$RELEASE_DIR"
           
-          # Flatten if needed
+          # Find the actual app directory (handle deployment-package folder)
           if [ -d "$RELEASE_DIR/deployment-package" ]; then
+            echo "Flattening package structure..."
             sudo mv "$RELEASE_DIR/deployment-package"/* "$RELEASE_DIR/"
             sudo rmdir "$RELEASE_DIR/deployment-package"
           fi
@@ -218,11 +219,22 @@ jobs:
           
           # Install dependencies
           if [ -f "$RELEASE_DIR/package.json" ]; then
+            echo "Installing dependencies..."
             sudo -u "$APP_USER" bash -c "cd '$RELEASE_DIR' && npm ci --omit=dev"
           fi
           
-          # Deploy
+          # Deploy - create symlink
+          echo "Creating symlink..."
           sudo ln -sfn "$RELEASE_DIR" "$APP_DIR/current"
+          
+          # Verify files are in place
+          echo "Verifying deployment..."
+          echo "Contents of current directory:"
+          ls -la "$APP_DIR/current/"
+          echo "Looking for server.js..."
+          ls -la "$APP_DIR/current/server.js" || echo "server.js not found"
+          echo "Contents of releases directory:"
+          ls -la "$APP_DIR/releases/"
           
           # Restart/Start with PM2
           if pm2 describe "$APP_NAME" >/dev/null 2>&1; then
