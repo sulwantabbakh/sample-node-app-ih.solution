@@ -252,7 +252,7 @@ jobs:
 
           # Start with PM2 (non-blocking)
           echo "Starting application with PM2..."
-          sudo -u "$APP_USER" pm2 start "$APP_DIR/current/server.js" --name "$APP_NAME" --no-daemon
+          sudo -u "$APP_USER" pm2 start "$APP_DIR/current/server.js" --name "$APP_NAME"
 
           echo "PM2 status:"
           sudo -u "$APP_USER" pm2 ls
