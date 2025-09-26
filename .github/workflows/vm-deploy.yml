@@ -1,4 +1,4 @@
-name: Lab 3 (Online) or Lab 1 (Onsite)
+name: Lab 1 (Deploy a Node.js App to an Azure VM using GitHub Actions)
 
 on:
   workflow_dispatch:
