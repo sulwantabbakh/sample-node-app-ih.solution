@@ -38,7 +38,7 @@ jobs:
       - name: Run unit tests with coverage and JUnit reports
         env:
           JEST_JUNIT_OUTPUT: coverage/junit.xml
-        run: npm run test:ci or true
+        run: npm run test:ci || true
 
       - name: Publish test results to Checks
         uses: dorny/test-reporter@v2.1.1
@@ -60,19 +60,16 @@ jobs:
       - name: SonarQube Scan
         uses: SonarSource/sonarqube-scan-action@v6.0.0
         env:
-          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+         SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+         SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
         with:
-          args: >
-            -Dsonar.projectKey=sample-node-app-saurabh
-            -Dsonar.organization=sda
-            -Dsonar.token=${{ secrets.SONAR_TOKEN }}
-            -Dsonar.host.url=${{ secrets.SONAR_HOST_URL }}
-            -Dsonar.sources=.
-            -Dsonar.exclusions=node_modules/**,coverage/**,tests/**,**/*.test.js,**/*.spec.js
-            -Dsonar.tests=tests/
-            -Dsonar.test.inclusions=**/*.test.js,**/*.spec.js
-            -Dsonar.coverage.exclusions=node_modules/**,coverage/**,tests/**,**/*.test.js,**/*.spec.js
+         args: >
+          -Dsonar.projectKey=sample-node-app-saurabh
+          -Dsonar.organization=sda
+          -Dsonar.sources=.
+          -Dsonar.exclusions=node_modules/**,coverage/**,tests/**,**/*.test.js,**/*.spec.js
+          -Dsonar.tests=tests/
+          -Dsonar.test.inclusions=**/*.test.js,**/*.spec.js
 
       - name: Create deployment package
         run: |
@@ -97,13 +94,10 @@ jobs:
           (cd "$GITHUB_WORKSPACE" && zip -r "$ZIP_NAME" "deployment-package")
           echo "ZIP_NAME=$ZIP_NAME" >> "$GITHUB_ENV"
 
-      - name: Azure login (client secret)
-        uses: azure/login@v2
+      - name: Azure Login
+        uses: azure/login@v1
         with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-          client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+         creds: ${{ secrets.AZURE_CREDENTIALS }}
 
       - name: Upload deployment package artifact
         uses: actions/upload-artifact@v4.6.2
