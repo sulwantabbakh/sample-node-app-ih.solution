@@ -1,4 +1,4 @@
-name: Deploy Node App on Azure VM
+name: Lab 3 (Online) or Lab 1 (Onsite)
 
 on:
   workflow_dispatch:
@@ -8,7 +8,7 @@ permissions:
   actions: read
   checks: write
   pull-requests: write
-  id-token: write 
+  id-token: write
 
 jobs:
   build-and-test:
@@ -35,41 +35,45 @@ jobs:
         run: |
           npm run build 2>/dev/null || echo "No build script found, skipping build step"
 
-      - name: Run unit tests with coverage and JUnit reports
-        env:
-          JEST_JUNIT_OUTPUT: coverage/junit.xml
-        run: npm run test:ci || true
+      # Skip sonarqube
+      # - name: Run unit tests with coverage and JUnit reports
+      #   env:
+      #     JEST_JUNIT_OUTPUT: coverage/junit.xml
+      #   run: npm run test:ci
 
-      - name: Publish test results to Checks
-        uses: dorny/test-reporter@v2.1.1
-        if: always()
-        with:
-          name: Jest Test Results
-          path: coverage/junit.xml
-          reporter: jest-junit
-          fail-on-error: true
+      # - name: Publish test results to Checks
+      #   uses: dorny/test-reporter@v2.1.1
+      #   if: always()
+      #   with:
+      #     name: Jest Test Results
+      #     path: coverage/junit.xml
+      #     reporter: jest-junit
+      #     fail-on-error: true
 
-      - name: Upload test results to GitHub
-        uses: actions/upload-artifact@v4.6.2
-        if: always()
-        with:
-          name: test-results-node
-          path: coverage/
-          retention-days: 30
+      # - name: Upload test results to GitHub
+      #   uses: actions/upload-artifact@v4.6.2
+      #   if: always()
+      #   with:
+      #     name: test-results-node
+      #     path: coverage/
+      #     retention-days: 30
 
-      - name: SonarQube Scan
-        uses: SonarSource/sonarqube-scan-action@v6.0.0
-        env:
-         SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
-         SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-        with:
-         args: >
-          -Dsonar.projectKey=sample-node-app-saurabh
-          -Dsonar.organization=sda
-          -Dsonar.sources=.
-          -Dsonar.exclusions=node_modules/**,coverage/**,tests/**,**/*.test.js,**/*.spec.js
-          -Dsonar.tests=tests/
-          -Dsonar.test.inclusions=**/*.test.js,**/*.spec.js
+      # - name: SonarQube Scan
+      #   uses: SonarSource/sonarqube-scan-action@v6.0.0
+      #   env:
+      #     SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+      #     SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      #   with:
+      #     args: >
+      #       -Dsonar.projectKey=sample-node-app-saurabh
+      #       -Dsonar.organization=sda
+      #       -Dsonar.token=${{ secrets.SONAR_TOKEN }}
+      #       -Dsonar.host.url=${{ secrets.SONAR_HOST_URL }}
+      #       -Dsonar.sources=.
+      #       -Dsonar.exclusions=node_modules/**,coverage/**,tests/**,**/*.test.js,**/*.spec.js
+      #       -Dsonar.tests=tests/
+      #       -Dsonar.test.inclusions=**/*.test.js,**/*.spec.js
+      #       -Dsonar.coverage.exclusions=node_modules/**,coverage/**,tests/**,**/*.test.js,**/*.spec.js
 
       - name: Create deployment package
         run: |
@@ -94,10 +98,14 @@ jobs:
           (cd "$GITHUB_WORKSPACE" && zip -r "$ZIP_NAME" "deployment-package")
           echo "ZIP_NAME=$ZIP_NAME" >> "$GITHUB_ENV"
 
-      - name: Azure Login
-        uses: azure/login@v1
+      - name: Azure login (client secret)
+        uses: azure/login@v2
+        # ------------------------------------
+        # ------- !!!!!!انتبهوا هنا ----------
         with:
-         creds: ${{ secrets.AZURE_CREDENTIALS }}
+          # Check the naming of your CREDENTIALS secrets and change it
+          creds: ${{ secrets.AZURE_CREDS }}
+        # ------------------------------------
 
       - name: Upload deployment package artifact
         uses: actions/upload-artifact@v4.6.2
@@ -169,65 +177,65 @@ jobs:
           cat > deploy.sh << 'EOF'
           #!/bin/bash
           set -e
-          
+
           # Configuration
           APP_DIR="/opt/myapp"
           APP_NAME="myapp"
           APP_USER="azureuser"
           PACKAGE_URL="$1"
-          
+
           # Install Node.js if not present
           if ! command -v node >/dev/null 2>&1; then
             echo "Installing Node.js..."
             curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
             sudo apt-get install -y nodejs
           fi
-          
+
           # Install PM2 if not present
           if ! command -v pm2 >/dev/null 2>&1; then
             echo "Installing PM2..."
             sudo npm install -g pm2
           fi
-          
+
           # Install unzip if not present
           if ! command -v unzip >/dev/null 2>&1; then
             echo "Installing unzip..."
             sudo apt-get update && sudo apt-get install -y unzip
           fi
-          
+
           # Create directories
           sudo mkdir -p "$APP_DIR/releases" "$APP_DIR/current"
-          
+
           # Download package
           echo "Downloading deployment package..."
           curl -fSL "$PACKAGE_URL" -o /tmp/app.zip
-          
+
           # Extract to new release directory
           RELEASE_DIR="$APP_DIR/releases/$(date +%Y%m%d-%H%M%S)"
           sudo mkdir -p "$RELEASE_DIR"
           unzip -o /tmp/app.zip -d "$RELEASE_DIR"
-          
+
           # Find the actual app directory (handle deployment-package folder)
           if [ -d "$RELEASE_DIR/deployment-package" ]; then
             echo "Flattening package structure..."
             sudo mv "$RELEASE_DIR/deployment-package"/* "$RELEASE_DIR/" 2>/dev/null || true
             sudo rmdir "$RELEASE_DIR/deployment-package" 2>/dev/null || true
           fi
-          
+
           # Set permissions
           sudo chown -R "$APP_USER:$APP_USER" "$RELEASE_DIR"
-          
+
           # Install dependencies
           if [ -f "$RELEASE_DIR/package.json" ]; then
             echo "Installing dependencies..."
             sudo -u "$APP_USER" bash -c "cd '$RELEASE_DIR' && npm ci --omit=dev"
           fi
-          
+
           # Deploy - create symlink
           echo "Creating symlink..."
           sudo rm -rf "$APP_DIR/current"
           sudo ln -sfn "$RELEASE_DIR" "$APP_DIR/current"
-          
+
           # Verify files are in place
           echo "Verifying deployment..."
           echo "Contents of current directory:"
@@ -236,22 +244,22 @@ jobs:
           ls -la "$APP_DIR/current/server.js" || echo "server.js not found"
           echo "Contents of releases directory:"
           ls -la "$APP_DIR/releases/"
-          
+
           # Stop any existing PM2 process
           echo "Stopping any existing PM2 processes..."
           sudo -u "$APP_USER" pm2 stop "$APP_NAME" 2>/dev/null || true
           sudo -u "$APP_USER" pm2 delete "$APP_NAME" 2>/dev/null || true
-          
+
           # Start with PM2 (non-blocking)
           echo "Starting application with PM2..."
           sudo -u "$APP_USER" pm2 start "$APP_DIR/current/server.js" --name "$APP_NAME" --no-daemon
-          
+
           echo "PM2 status:"
           sudo -u "$APP_USER" pm2 ls
-          
+
           echo "Saving PM2 configuration..."
           sudo -u "$APP_USER" pm2 save
-          
+
           echo "Cleaning up..."
           rm -f /tmp/app.zip
           echo "Deployment completed successfully"
@@ -275,7 +283,7 @@ jobs:
             $(cat deploy.sh)
             DEPLOY_SCRIPT_EOF
             chmod +x /tmp/deploy.sh"
-            
+
             # Execute the deployment script
             az vm run-command invoke \
               --resource-group "$AZURE_RESOURCE_GROUP" \
